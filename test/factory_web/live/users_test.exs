@@ -116,10 +116,28 @@ defmodule FactoryWeb.UsersTest do
     test "cannot remove the only administrator", %{conn: conn, user: admin} do
       {:ok, view, _html} = live(conn, ~p"/users/#{admin.id}/edit")
 
-      assert view |> form("#user-form", user: %{role: "viewer"}) |> render_submit() =~
-               "only active administrator"
+      # The form does not offer it...
+      assert has_element?(view, "#last-admin-note")
+      assert has_element?(view, "select[name='user[role]'][disabled]")
+      assert has_element?(view, "input[type=checkbox][name='user[active]'][disabled]")
 
-      assert Accounts.get_user!(admin.id).role == "admin"
+      # ...and the server refuses it when sent anyway.
+      for change <- [%{"role" => "viewer"}, %{"role" => "operator"}, %{"active" => "false"}] do
+        assert render_hook(view, "save", %{"user" => change}) =~ "only active administrator"
+      end
+
+      assert %{role: "admin", active: true} = Accounts.get_user!(admin.id)
+
+      # A deactivated administrator does not count as another one.
+      other = user_fixture()
+      {:ok, _} = Accounts.update_user(other, %{active: false})
+      assert Accounts.last_admin?(Accounts.get_user!(admin.id))
+
+      # With a second active administrator the access can change.
+      user_fixture()
+      {:ok, view, _html} = live(conn, ~p"/users/#{admin.id}/edit")
+      refute has_element?(view, "#last-admin-note")
+      refute has_element?(view, "select[name='user[role]'][disabled]")
     end
   end
 

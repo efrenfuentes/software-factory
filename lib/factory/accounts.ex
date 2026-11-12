@@ -45,6 +45,10 @@ defmodule Factory.Accounts do
     changeset = User.admin_changeset(user, attrs)
 
     Repo.transaction(fn ->
+      # One change at a time: two administrators demoting each other at the same
+      # moment must not both succeed.
+      Repo.query!("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
+
       with {:ok, updated} <- Repo.update(changeset),
            :ok <- keep_an_admin(changeset) do
         ended =
@@ -58,6 +62,13 @@ defmodule Factory.Accounts do
       end
     end)
   end
+
+  @doc "Whether this is the only active administrator, whose role and status cannot change."
+  def last_admin?(%User{role: "admin", active: true, id: id}) when not is_nil(id) do
+    not Repo.exists?(from u in User, where: u.role == "admin" and u.active and u.id != ^id)
+  end
+
+  def last_admin?(%User{}), do: false
 
   defp keep_an_admin(changeset) do
     if Repo.exists?(from u in User, where: u.role == "admin" and u.active) do

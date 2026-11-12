@@ -25,7 +25,12 @@ defmodule FactoryWeb.UsersLive do
   end
 
   defp edit(socket, user, title) do
-    assign(socket, page_title: title, user: user, form: to_form(Accounts.change_user(user)))
+    assign(socket,
+      page_title: title,
+      user: user,
+      last_admin?: Accounts.last_admin?(user),
+      form: to_form(Accounts.change_user(user))
+    )
   end
 
   @impl true
@@ -157,7 +162,16 @@ defmodule FactoryWeb.UsersLive do
             <.input field={@form[:last_name]} label="Last name" />
           </div>
           <.input field={@form[:email]} type="email" label="Email" autocomplete="off" />
-          <.input field={@form[:role]} type="select" label="Access" options={role_options()} />
+          <.input
+            field={@form[:role]}
+            type="select"
+            label="Access"
+            options={role_options()}
+            disabled={@last_admin?}
+          />
+          <p :if={@last_admin?} id="last-admin-note" class="-mt-1.5 mb-3 text-xs text-base-content/60">
+            This is the only active administrator, so its access cannot change. Make someone else an administrator first.
+          </p>
           <.input
             field={@form[:password]}
             type="password"
@@ -175,6 +189,7 @@ defmodule FactoryWeb.UsersLive do
             field={@form[:active]}
             type="checkbox"
             label="Can sign in"
+            disabled={@last_admin?}
           />
           <p :if={@live_action == :edit} class="-mt-1.5 text-xs text-base-content/60">
             Changing the access, the password or this box signs the person out everywhere.
