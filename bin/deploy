@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Builds a new release and switches the running service over to it.
+# Stops at the first failing step, so the running version keeps serving
+# until the new one has been built and migrated.
+#
+#   bin/deploy            # git pull, build, migrate, restart
+#   bin/deploy --no-pull  # deploy the code that is already checked out
+set -euo pipefail
+
+cd "$(dirname -- "$0")/.."
+
+env_file="${FACTORY_ENV_FILE:-/etc/factory/factory.env}"
+service="${FACTORY_SERVICE:-factory}"
+pull=true
+[[ "${1:-}" == "--no-pull" ]] && pull=false
+
+step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+
+# Load the same variables the service uses, literally (no shell expansion,
+# so passwords with `$` or quotes survive), the way systemd reads them.
+while IFS= read -r line || [[ -n "$line" ]]; do
+  [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+  export "${line?}"
+done < "$env_file"
+export MIX_ENV=prod
+
+if $pull; then
+  step "Pulling"
+  git pull --ff-only
+fi
+
+step "Fetching dependencies"
+mix deps.get --only prod
+
+step "Building assets"
+mix assets.setup
+mix assets.deploy
+
+step "Building the release"
+mix release --overwrite
+
+step "Running migrations"
+_build/prod/rel/factory/bin/migrate
+
+step "Restarting $service"
+sudo systemctl restart "$service"
+
+step "Waiting for the app on port ${PORT:-4000}"
+for _ in $(seq 1 30); do
+  if curl -fs -o /dev/null "http://127.0.0.1:${PORT:-4000}/users/log-in"; then
+    printf 'Deployed %s\n' "$(git log -1 --format='%h %s')"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "The app did not answer after 30s. Check: journalctl -u $service -n 50" >&2
+exit 1
