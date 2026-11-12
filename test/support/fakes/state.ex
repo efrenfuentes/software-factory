@@ -15,7 +15,8 @@ defmodule Factory.Fakes.State do
       issues: %{},
       listed: [],
       prs: %{},
-      code_changed?: true
+      code_changed?: true,
+      plan: []
     }
   end
 

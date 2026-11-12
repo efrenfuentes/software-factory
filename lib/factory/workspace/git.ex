@@ -121,6 +121,29 @@ defmodule Factory.Workspace.Git do
     :ok
   end
 
+  @doc """
+  The committed plan files, read from the issue's branch rather than its
+  worktree, so they stay readable after the worktree is removed.
+  """
+  @impl true
+  def read_plan(_project, %{branch: nil}), do: []
+
+  def read_plan(project, issue) do
+    repo = repo_dir(project)
+
+    ref =
+      File.dir?(repo) &&
+        Enum.find(
+          ["refs/heads/#{issue.branch}", "refs/remotes/origin/#{issue.branch}"],
+          &match?({:ok, _}, git(repo, ["rev-parse", "--verify", "--quiet", &1]))
+        )
+
+    for file <- Workspace.plan_files(),
+        ref,
+        {:ok, content} <- [git(repo, ["show", "#{ref}:#{Workspace.plan_dir(issue)}/#{file}"])],
+        do: %{name: file, content: content}
+  end
+
   defp git(dir, args), do: Shell.run("git", args, cd: dir, timeout: :timer.minutes(5))
 
   defp describe(reason) when is_binary(reason), do: reason

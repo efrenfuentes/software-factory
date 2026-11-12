@@ -123,4 +123,65 @@ defmodule FactoryWeb.FactoryLiveTest do
     assert Pipeline.get_issue!(issue.id).state == "cancelled"
     refute has_element?(view, "#stop-button")
   end
+
+  test "a person reads the plan on the issue page and asks for changes or approves it", %{
+    conn: conn
+  } do
+    Fakes.GitHub.put_issue(7, title: "Add export")
+
+    Fakes.Agent.script(:planner, [
+      %{
+        "status" => "ready",
+        "summary" => "Plan",
+        "questions" => [],
+        "difficulty" => "hard",
+        "difficulty_reason" => "migration"
+      }
+    ])
+
+    {:ok, issue} =
+      Pipeline.track_issue(project(), %{number: 7, title: "Add export", body: "", url: "u"})
+
+    {:ok, view, _html} = live(conn, ~p"/issues/#{issue.id}")
+    refute has_element?(view, "#plan")
+
+    Fakes.State.put(:plan, [
+      %{name: "spec.md", content: "# Spec\n\nExport as **CSV** <script>alert(1)</script>"},
+      %{name: "plan.md", content: "Add `Exporter`"},
+      %{name: "tasks.md", content: "- [ ] T1 Write the exporter"}
+    ])
+
+    issue = run_to_rest(issue)
+    assert issue.state == "awaiting_plan_approval"
+
+    # Open on the spec while it waits for a decision, rendered and sanitized.
+    assert has_element?(view, "#plan-content strong", "CSV")
+    refute has_element?(view, "#plan-content script")
+
+    view |> element("#plan-tab-tasks") |> render_click()
+    assert has_element?(view, "#plan-content li", "T1 Write the exporter")
+
+    assert view |> form("#plan-feedback-form", review: %{feedback: "  "}) |> render_submit() =~
+             "Write what should change"
+
+    view
+    |> form("#plan-feedback-form", review: %{feedback: "Use JSON, not CSV"})
+    |> render_submit()
+
+    # Posted as the person's own comment, without the factory's marker.
+    assert {7, "Use JSON, not CSV"} in Fakes.GitHub.posted()
+    assert Pipeline.get_issue!(issue.id).state == "planning"
+    refute has_element?(view, "#plan-feedback-form")
+
+    issue = run_to_rest(issue)
+    assert issue.state == "awaiting_plan_approval"
+    view |> element("#approve-plan-button") |> render_click()
+    assert Pipeline.get_issue!(issue.id).state == "developing"
+
+    # Still readable afterwards, folded away.
+    assert has_element?(view, "#plan-toggle")
+    refute has_element?(view, "#plan-content")
+    view |> element("#plan-toggle") |> render_click()
+    assert has_element?(view, "#plan-content")
+  end
 end

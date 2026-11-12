@@ -61,6 +61,13 @@ ready_to_merge ──merge de una persona──▶ done
 Spec, plan y tareas quedan en la rama del issue, en `.factory/issue-N/`, y forman parte
 del PR.
 
+## Plan en el panel
+
+La página de cada issue muestra `spec.md`, `plan.md` y `tasks.md` en cuanto existen,
+leídos de la rama del issue. Mientras el plan espera aprobación puedes aprobarlo ahí
+mismo o escribir qué debe cambiar: ese texto se publica en el issue de GitHub como
+comentario tuyo y el Planner revisa el plan.
+
 ## Comandos en GitHub
 
 En un comentario del issue o del PR, al inicio de una línea:

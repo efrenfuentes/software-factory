@@ -52,7 +52,12 @@ defmodule Factory.Workspace.GitTest do
     File.write!(Path.join(path, "README.md"), "edited by the planner\n")
 
     assert Git.plan_ready?(path, @issue)
+    assert Git.read_plan(@project, @issue) == []
     assert :ok = Git.commit(path, "Plan for #7", only: ".factory/issue-7")
+
+    assert [%{name: "spec.md", content: "x"}, %{name: "plan.md"}, %{name: "tasks.md"}] =
+             Git.read_plan(@project, @issue)
+
     refute File.exists?(Path.join(path, "stray.txt"))
     assert File.read!(Path.join(path, "README.md")) == "app\n"
     refute Git.code_changed?(path, @project)
@@ -69,6 +74,9 @@ defmodule Factory.Workspace.GitTest do
 
     assert :ok = Git.cleanup(@project, @issue)
     refute File.exists?(path)
+    # The plan is read from the branch, so it outlives the worktree.
+    assert [%{name: "spec.md"}, _, _] = Git.read_plan(@project, @issue)
+    assert Git.read_plan(%Project{repo: "acme/never-cloned"}, @issue) == []
     assert {:ok, ^path} = Git.prepare(@project, @issue)
     assert File.exists?(Path.join(path, "lib.ex"))
   end

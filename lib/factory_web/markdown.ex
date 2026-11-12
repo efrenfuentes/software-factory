@@ -8,16 +8,22 @@ defmodule FactoryWeb.Markdown do
 
   @options [
     extension: [autolink: true, strikethrough: true, table: true],
-    render: [escape: true, hardbreaks: true],
     sanitize: MDEx.Document.default_sanitize_options(),
     syntax_highlight: nil
   ]
 
-  @spec to_html(String.t() | nil) :: Phoenix.HTML.safe()
-  def to_html(nil), do: {:safe, ""}
+  @doc """
+  With `breaks: true` (the default) a single line break is kept, which suits
+  short answers. Files wrapped at a fixed width want `breaks: false`.
+  """
+  @spec to_html(String.t() | nil, keyword()) :: Phoenix.HTML.safe()
+  def to_html(text, opts \\ [])
+  def to_html(nil, _opts), do: {:safe, ""}
 
-  def to_html(text) do
-    case MDEx.to_html(text, @options) do
+  def to_html(text, opts) do
+    render = [escape: true, hardbreaks: Keyword.get(opts, :breaks, true)]
+
+    case MDEx.to_html(text, [{:render, render} | @options]) do
       {:ok, html} -> {:safe, html}
       {:error, _} -> Phoenix.HTML.html_escape(text)
     end

@@ -112,6 +112,8 @@
 .markdown ol { list-style: decimal; padding-left: 1.25rem; }
 .markdown li + li { margin-top: 0.15em; }
 .markdown h1, .markdown h2, .markdown h3, .markdown h4 { margin: 0.8em 0 0.3em; font-weight: 600; }
+.markdown h1 { font-size: 1.3em; }
+.markdown h2 { font-size: 1.15em; }
 .markdown a { color: var(--color-primary); text-decoration: underline; text-underline-offset: 2px; }
 .markdown a:hover { text-decoration-thickness: 2px; }
 .markdown code {

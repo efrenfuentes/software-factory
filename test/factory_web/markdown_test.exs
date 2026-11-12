@@ -15,6 +15,9 @@ defmodule FactoryWeb.MarkdownTest do
 
   test "keeps single line breaks" do
     assert html("line one\nline two") =~ "line one<br>"
+
+    refute Markdown.to_html("line one\nline two", breaks: false) |> Phoenix.HTML.safe_to_string() =~
+             "<br>"
   end
 
   test "shows raw HTML as text and never produces scripts, handlers or script links" do

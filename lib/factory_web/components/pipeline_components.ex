@@ -27,12 +27,16 @@ defmodule FactoryWeb.PipelineComponents do
   end
 
   attr :text, :string, required: true
+  attr :id, :string, default: nil
   attr :class, :any, default: nil
+  attr :breaks, :boolean, default: true, doc: "keep single line breaks"
 
   @doc "Text written by an agent, rendered from Markdown."
   def markdown(assigns) do
     ~H"""
-    <div class={["markdown", @class]}>{FactoryWeb.Markdown.to_html(@text)}</div>
+    <div id={@id} class={["markdown", @class]}>
+      {FactoryWeb.Markdown.to_html(@text, breaks: @breaks)}
+    </div>
     """
   end
 

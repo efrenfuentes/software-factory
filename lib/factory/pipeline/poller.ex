@@ -100,6 +100,21 @@ defmodule Factory.Pipeline.Poller do
   def stop(%Issue{} = issue),
     do: finish(Repo.preload(issue, :project), "cancelled", "Stopped by a person")
 
+  @doc """
+  A person asks for changes to the plan from the UI. Their feedback is posted on
+  the issue unsigned, as their own comment, so the Planner reads it as a
+  maintainer's decision; the plan is then revised right away.
+  """
+  def request_plan_changes(%Issue{state: "awaiting_plan_approval"} = issue, feedback) do
+    issue = Repo.preload(issue, :project)
+
+    with :ok <- GitHub.impl().comment(issue.project.repo, issue.number, feedback) do
+      Pipeline.transition(issue, "planning", %{}, "Feedback on the plan received")
+    end
+  end
+
+  def request_plan_changes(%Issue{}, _feedback), do: {:error, :not_waiting_for_approval}
+
   defp resume(issue, fun) do
     GitHub.impl().set_label(issue.project.repo, issue.number, Stages.needs_human_label(), false)
     fun.()

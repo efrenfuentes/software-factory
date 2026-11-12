@@ -13,6 +13,7 @@ defmodule Factory.Workspace do
   @callback code_changed?(path :: String.t(), Project.t()) :: boolean()
   @callback push(path :: String.t(), Issue.t()) :: :ok | {:error, String.t()}
   @callback cleanup(Project.t(), Issue.t()) :: :ok
+  @callback read_plan(Project.t(), Issue.t()) :: [%{name: String.t(), content: String.t()}]
 
   def impl, do: Application.fetch_env!(:factory, :workspace)
 

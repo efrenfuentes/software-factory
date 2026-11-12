@@ -16,4 +16,6 @@ defmodule Factory.Fakes.Workspace do
   def push(_path, _issue), do: :ok
   @impl true
   def cleanup(_project, _issue), do: :ok
+  @impl true
+  def read_plan(_project, _issue), do: Factory.Fakes.State.get(:plan)
 end

@@ -3,6 +3,7 @@ defmodule FactoryWeb.IssueLive do
   use FactoryWeb, :live_view
   alias Factory.Pipeline
   alias Factory.Pipeline.{Issue, Poller}
+  alias Factory.Workspace
   alias FactoryWeb.Format
 
   @impl true
@@ -12,16 +13,30 @@ defmodule FactoryWeb.IssueLive do
       :timer.send_interval(1000, :tick)
     end
 
-    {:ok, socket |> assign(now: DateTime.utc_now()) |> load(String.to_integer(id))}
+    {:ok,
+     socket
+     |> assign(now: DateTime.utc_now(), plan_tab: nil, plan_choice: nil)
+     |> assign(feedback: feedback_form(""))
+     |> load(String.to_integer(id))}
   end
 
   defp load(socket, id) do
     issue = Pipeline.get_issue!(id)
     runs = Pipeline.list_runs(issue)
 
+    plan = Workspace.impl().read_plan(issue.project, issue)
+
     assign(socket,
       page_title: "##{issue.number} #{issue.title}",
       issue: issue,
+      plan: plan,
+      # Open while the plan waits for a decision, unless the person chose otherwise.
+      plan_open:
+        if(is_nil(socket.assigns.plan_choice),
+          do: issue.state == "awaiting_plan_approval",
+          else: socket.assigns.plan_choice
+        ),
+      plan_file: Enum.find(plan, &(&1.name == socket.assigns.plan_tab)) || List.first(plan),
       transitions: Pipeline.list_transitions(issue),
       runs: runs,
       cost:
@@ -53,10 +68,59 @@ defmodule FactoryWeb.IssueLive do
     end
   end
 
+  def handle_event("plan_tab", %{"file" => name}, socket) do
+    {:noreply,
+     assign(socket,
+       plan_tab: name,
+       plan_file: Enum.find(socket.assigns.plan, &(&1.name == name))
+     )}
+  end
+
+  def handle_event("toggle_plan", _params, socket) do
+    open? = not socket.assigns.plan_open
+    {:noreply, assign(socket, plan_choice: open?, plan_open: open?)}
+  end
+
+  def handle_event("feedback_changed", %{"review" => %{"feedback" => text}}, socket) do
+    {:noreply, assign(socket, feedback: feedback_form(text))}
+  end
+
+  def handle_event("request_changes", %{"review" => %{"feedback" => text}}, socket) do
+    text = String.trim(text)
+
+    cond do
+      text == "" ->
+        {:noreply, put_flash(socket, :error, "Write what should change in the plan.")}
+
+      true ->
+        case Poller.request_plan_changes(socket.assigns.issue, text) do
+          {:ok, issue} ->
+            {:noreply,
+             socket
+             |> assign(feedback: feedback_form(""))
+             |> put_flash(:info, "Feedback posted on the issue. The plan is being revised.")
+             |> load(issue.id)}
+
+          {:error, :not_waiting_for_approval} ->
+            {:noreply, put_flash(socket, :error, "This issue is not waiting for approval.")}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Could not post on GitHub: #{inspect(reason)}")}
+        end
+    end
+  end
+
   def handle_event("stop", _params, socket) do
     {:ok, issue} = Poller.stop(socket.assigns.issue)
     {:noreply, socket |> put_flash(:info, "Stopped.") |> load(issue.id)}
   end
+
+  defp feedback_form(text), do: to_form(%{"feedback" => text}, as: :review)
+
+  defp plan_label("spec.md"), do: "Spec"
+  defp plan_label("plan.md"), do: "Plan"
+  defp plan_label("tasks.md"), do: "Tasks"
+  defp plan_label(name), do: name
 
   defp approve_label(%Issue{state: "awaiting_plan_approval"}), do: "Approve plan"
   defp approve_label(%Issue{state: "failed"}), do: "Retry"
@@ -160,6 +224,96 @@ defmodule FactoryWeb.IssueLive do
         />
         <.fact label="Cost" value={Format.cost(@cost)} />
       </dl>
+
+      <section
+        :if={@plan != []}
+        id="plan"
+        class={[
+          "mt-6 rounded-xl border bg-base-100 shadow-sm",
+          if(@issue.state == "awaiting_plan_approval",
+            do: "border-warning/50",
+            else: "border-base-300"
+          )
+        ]}
+      >
+        <div class="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+          <button
+            id="plan-toggle"
+            type="button"
+            phx-click="toggle_plan"
+            aria-expanded={to_string(@plan_open)}
+            class="flex items-center gap-2 text-left font-semibold transition hover:text-primary"
+          >
+            <span class={["flex transition-transform", @plan_open && "rotate-90"]}>
+              <.icon name="hero-chevron-right-micro" class="size-4" />
+            </span>
+            Plan
+            <span
+              :if={@issue.state == "awaiting_plan_approval"}
+              class="text-sm font-normal text-warning"
+            >
+              waiting for your decision
+            </span>
+          </button>
+          <div :if={@plan_open} id="plan-tabs" role="tablist" class="flex gap-1">
+            <button
+              :for={file <- @plan}
+              id={"plan-tab-#{Path.rootname(file.name)}"}
+              type="button"
+              role="tab"
+              aria-selected={to_string(file.name == @plan_file.name)}
+              phx-click="plan_tab"
+              phx-value-file={file.name}
+              class={[
+                "rounded-lg px-3 py-1.5 text-sm font-medium transition",
+                if(file.name == @plan_file.name,
+                  do: "bg-base-200 text-base-content",
+                  else: "text-base-content/60 hover:bg-base-200/60 hover:text-base-content"
+                )
+              ]}
+            >
+              {plan_label(file.name)}
+            </button>
+          </div>
+        </div>
+
+        <div :if={@plan_open} class="border-t border-base-300">
+          <.markdown
+            id="plan-content"
+            text={@plan_file.content}
+            breaks={false}
+            class="max-h-[36rem] overflow-auto px-5 py-4 text-sm leading-relaxed"
+          />
+
+          <.form
+            :if={@issue.state == "awaiting_plan_approval"}
+            for={@feedback}
+            id="plan-feedback-form"
+            phx-change="feedback_changed"
+            phx-submit="request_changes"
+            class="border-t border-base-300 px-5 py-4"
+          >
+            <.input
+              field={@feedback[:feedback]}
+              type="textarea"
+              label="Ask for changes"
+              placeholder="What should change in the plan?"
+              rows="3"
+            />
+            <p class="-mt-1 text-xs text-base-content/60">
+              Posted on the GitHub issue as your comment; the Planner then revises the plan.
+            </p>
+            <div class="mt-3 flex flex-wrap justify-end gap-2">
+              <.button id="request-changes-button" type="submit" phx-disable-with="Posting…">
+                Request changes
+              </.button>
+              <.button id="approve-plan-button" type="button" variant="primary" phx-click="approve">
+                Approve plan
+              </.button>
+            </div>
+          </.form>
+        </div>
+      </section>
 
       <div class="mt-8 grid gap-8 lg:grid-cols-5">
         <section class="lg:col-span-2">
