@@ -26,6 +26,7 @@ defmodule FactoryWeb.Layouts do
 
   """
   attr :flash, :map, required: true, doc: "the map of flash messages"
+  attr :active, :atom, default: nil, doc: "the section to highlight: :issues or :projects"
 
   attr :current_scope, :map,
     default: nil,
@@ -35,40 +36,58 @@ defmodule FactoryWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <header class="sticky top-0 z-10 border-b border-base-300 bg-base-100/90 backdrop-blur">
-      <div class="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3 sm:px-6">
+    <header class="sticky top-0 z-20 border-b border-base-300 bg-base-100/85 backdrop-blur">
+      <div class="mx-auto flex h-14 max-w-6xl items-center gap-2 px-3 sm:gap-6 sm:px-6">
         <.link
           navigate={~p"/"}
-          class="flex items-center gap-2 whitespace-nowrap font-semibold tracking-tight"
+          class="flex shrink-0 items-center gap-2.5 rounded font-semibold tracking-tight"
+          aria-label="Software Factory"
         >
-          <span class="grid size-7 place-items-center rounded-md bg-primary text-primary-content">
-            <.icon name="hero-cog-6-tooth-micro" class="size-4" />
+          <span class="flex items-center" aria-hidden="true">
+            <span class="size-2 rounded-full bg-base-content" />
+            <span class="h-px w-2 bg-base-content" />
+            <span class="size-2 rounded-full bg-primary" />
+            <span class="h-px w-2 bg-base-content/40" />
+            <span class="size-2 rounded-full border border-base-content/40" />
           </span>
-          Software Factory
+          <span class="hidden sm:inline">Software Factory</span>
         </.link>
-        <nav class="flex flex-1 items-center gap-1 text-sm">
-          <.link
-            navigate={~p"/"}
-            class="rounded-md px-3 py-1.5 text-base-content/70 transition hover:bg-base-200 hover:text-base-content"
-          >
-            Issues
-          </.link>
-          <.link
-            navigate={~p"/projects"}
-            class="rounded-md px-3 py-1.5 text-base-content/70 transition hover:bg-base-200 hover:text-base-content"
-          >
-            Projects
-          </.link>
+        <nav class="flex h-full flex-1 items-stretch gap-1 text-sm" aria-label="Main">
+          <.nav_link navigate={~p"/"} active={@active == :issues}>Issues</.nav_link>
+          <.nav_link navigate={~p"/projects"} active={@active == :projects}>Projects</.nav_link>
         </nav>
         <.theme_toggle />
       </div>
     </header>
 
-    <main class="mx-auto max-w-7xl px-4 py-8 sm:px-6">
+    <main class="mx-auto max-w-6xl px-3 py-6 sm:px-6 sm:py-8">
       {render_slot(@inner_block)}
     </main>
 
     <.flash_group flash={@flash} />
+    """
+  end
+
+  attr :navigate, :string, required: true
+  attr :active, :boolean, default: false
+  slot :inner_block, required: true
+
+  defp nav_link(assigns) do
+    ~H"""
+    <.link
+      navigate={@navigate}
+      aria-current={@active && "page"}
+      class={[
+        "relative flex items-center px-2.5 transition sm:px-3",
+        if(@active,
+          do:
+            "font-medium text-base-content after:absolute after:inset-x-2 after:bottom-0 after:h-0.5 after:bg-primary",
+          else: "text-base-content/60 hover:text-base-content"
+        )
+      ]}
+    >
+      {render_slot(@inner_block)}
+    </.link>
     """
   end
 
@@ -122,31 +141,35 @@ defmodule FactoryWeb.Layouts do
   """
   def theme_toggle(assigns) do
     ~H"""
-    <div class="card relative flex flex-row items-center border-2 border-base-300 bg-base-300 rounded-full">
-      <div class="absolute w-1/3 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 transition-[left]" />
-
+    <div
+      class="flex shrink-0 items-center rounded-md border border-base-300 p-0.5"
+      role="group"
+      aria-label="Theme"
+    >
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        :for={
+          {theme, icon, label} <- [
+            {"system", "hero-computer-desktop-micro", "Match the system"},
+            {"light", "hero-sun-micro", "Light"},
+            {"dark", "hero-moon-micro", "Dark"}
+          ]
+        }
+        type="button"
+        class={[
+          "grid size-8 cursor-pointer place-items-center rounded text-base-content/50 transition hover:text-base-content sm:size-7",
+          theme == "system" &&
+            "[html:not([data-theme])_&]:bg-base-200 [html:not([data-theme])_&]:text-base-content",
+          theme == "light" &&
+            "[[data-theme=light]_&]:bg-base-200 [[data-theme=light]_&]:text-base-content",
+          theme == "dark" &&
+            "[[data-theme=dark]_&]:bg-base-200 [[data-theme=dark]_&]:text-base-content"
+        ]}
         phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="system"
+        data-phx-theme={theme}
+        aria-label={label}
+        title={label}
       >
-        <.icon name="hero-computer-desktop-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="light"
-      >
-        <.icon name="hero-sun-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="dark"
-      >
-        <.icon name="hero-moon-micro" class="size-4 opacity-75 hover:opacity-100" />
+        <.icon name={icon} class="size-4" />
       </button>
     </div>
     """

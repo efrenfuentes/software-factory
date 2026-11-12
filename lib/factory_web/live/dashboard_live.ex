@@ -3,14 +3,7 @@ defmodule FactoryWeb.DashboardLive do
   use FactoryWeb, :live_view
   alias Factory.Pipeline
   alias Factory.Pipeline.Issue
-  alias FactoryWeb.Format
-
-  @phases [
-    {"Plan", "planning"},
-    {"Plan review", "plan_review"},
-    {"Develop", "developing"},
-    {"PR review", "pr_review"}
-  ]
+  alias FactoryWeb.{Format, Track}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -19,8 +12,7 @@ defmodule FactoryWeb.DashboardLive do
       :timer.send_interval(1000, :tick)
     end
 
-    {:ok,
-     socket |> assign(page_title: "Issues", now: DateTime.utc_now(), phases: @phases) |> load()}
+    {:ok, socket |> assign(page_title: "Issues", now: DateTime.utc_now()) |> load()}
   end
 
   @impl true
@@ -60,126 +52,108 @@ defmodule FactoryWeb.DashboardLive do
     end
   end
 
-  defp last_run(runs, stage), do: runs |> Enum.filter(&(&1.stage == stage)) |> List.last()
+  defp row_edge(state) do
+    case Format.tone(state) do
+      :person -> "border-l-warning"
+      :failed -> "border-l-error"
+      :working -> "border-l-primary"
+      _ -> "border-l-base-300"
+    end
+  end
 
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash}>
-      <div class="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 class="text-2xl font-semibold tracking-tight">Issues</h1>
-          <p class="mt-1 text-sm text-base-content/60">
-            GitHub is checked every minute for labelled issues, answers and merged pull requests.
-          </p>
-        </div>
-      </div>
+    <Layouts.app flash={@flash} active={:issues}>
+      <h1 class="text-2xl font-semibold tracking-tight">Issues</h1>
+      <p class="mt-1 max-w-prose text-sm text-base-content/60">
+        GitHub is checked every minute for labelled issues, answers and merged pull requests.
+      </p>
 
-      <dl class="mt-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <.tile id="stat-working" label="Being worked on" value={@working} tone="text-info" />
-        <.tile id="stat-waiting" label="Waiting on you" value={@waiting} tone="text-warning" />
-        <.tile id="stat-done" label="Merged" value={@done} tone="text-success" />
-        <.tile id="stat-cost" label="Total cost" value={Format.cost(@cost)} tone="" />
-      </dl>
+      <.figures class="mt-5 grid-cols-2 lg:grid-cols-4">
+        <.figure
+          id="stat-working"
+          label="Being worked on"
+          value={to_string(@working)}
+          tone="text-primary"
+        />
+        <.figure
+          id="stat-waiting"
+          label="Waiting on you"
+          value={to_string(@waiting)}
+          tone="text-warning"
+        />
+        <.figure id="stat-done" label="Merged" value={to_string(@done)} tone="text-success" />
+        <.figure id="stat-cost" label="Total cost" value={Format.cost(@cost)} />
+      </.figures>
 
       <div
         :if={@rows == []}
         id="empty-state"
-        class="mt-8 rounded-xl border border-dashed border-base-300 bg-base-100 px-6 py-16 text-center"
+        class="mt-6 rounded-lg border border-dashed border-base-300 bg-base-100 px-5 py-14 text-center"
       >
         <.icon name="hero-inbox" class="size-8 text-base-content/30" />
         <p class="mt-3 font-medium">No issues yet</p>
-        <p :if={@projects?} class="mt-1 text-sm text-base-content/60">
-          Add a project's trigger label to a GitHub issue and it will show up here within a minute.
+        <p :if={@projects?} class="mx-auto mt-1 max-w-sm text-sm text-base-content/60">
+          Add a project's trigger label to a GitHub issue and it shows up here within a minute.
         </p>
-        <p :if={not @projects?} class="mt-1 text-sm text-base-content/60">
+        <p :if={not @projects?} class="mx-auto mt-1 max-w-sm text-sm text-base-content/60">
           Start by <.link
             navigate={~p"/projects/new"}
-            class="font-medium text-primary hover:underline"
+            class="font-medium text-primary underline underline-offset-2"
           >adding a project</.link>.
         </p>
       </div>
 
-      <div
-        :if={@rows != []}
-        class="mt-6 overflow-x-auto rounded-xl border border-base-300 bg-base-100 shadow-sm"
-      >
-        <table id="issues" class="w-full min-w-[72rem] text-left text-sm">
-          <thead class="border-b border-base-300 text-xs uppercase tracking-wide text-base-content/50">
-            <tr>
-              <th class="px-4 py-3 font-medium">Issue</th>
-              <th class="px-4 py-3 font-medium">Stage</th>
-              <th :for={{label, _} <- @phases} class="px-4 py-3 font-medium">{label}</th>
-              <th class="px-4 py-3 font-medium">Factory time</th>
-              <th class="px-4 py-3 font-medium">Waiting on people</th>
-              <th class="px-4 py-3 text-right font-medium">Cost</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-base-300">
-            <tr
-              :for={%{issue: issue} = row <- @rows}
-              id={"issue-#{issue.id}"}
-              phx-click={JS.navigate(~p"/issues/#{issue.id}")}
-              class="cursor-pointer align-top transition hover:bg-base-200/60"
-            >
-              <td class="max-w-xs px-4 py-3">
-                <div class="flex items-center gap-2">
-                  <.link
-                    navigate={~p"/issues/#{issue.id}"}
-                    class="truncate font-medium hover:underline"
-                  >
-                    {issue.title}
-                  </.link>
-                  <.difficulty difficulty={issue.difficulty} />
-                </div>
-                <div class="mt-0.5 text-xs text-base-content/50">
-                  {issue.project.repo} #{issue.number}
-                </div>
-              </td>
-              <td class="px-4 py-3">
+      <ul :if={@rows != []} id="issues" class="mt-4 space-y-2">
+        <li :for={%{issue: issue} = row <- @rows} id={"issue-#{issue.id}"}>
+          <.link
+            navigate={~p"/issues/#{issue.id}"}
+            class={[
+              "group block rounded-lg border border-l-2 border-base-300 bg-base-100 p-4 transition hover:border-base-content/40",
+              "lg:grid lg:grid-cols-[minmax(0,1fr)_25rem_10rem_4rem] lg:items-center lg:gap-6",
+              row_edge(issue.state)
+            ]}
+          >
+            <div class="min-w-0">
+              <div class="truncate font-medium transition group-hover:text-primary">
+                {issue.title}
+              </div>
+              <div class="mt-0.5 truncate font-mono text-xs text-base-content/50">
+                {issue.project.repo} #{issue.number}
+              </div>
+              <div class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
                 <.state_badge state={issue.state} />
-                <div class="mt-1 text-xs tabular-nums text-base-content/50">
+                <.difficulty difficulty={issue.difficulty} />
+                <span class="font-mono text-xs tabular-nums text-base-content/50">
                   {if Issue.terminal?(issue),
                     do: Format.time(issue.state_entered_at),
                     else: "for " <> Format.duration(Format.seconds(issue.state_entered_at, nil, @now))}
-                </div>
-              </td>
-              <td :for={{_, stage} <- @phases} class="px-4 py-3">
-                <% run = last_run(row.runs, stage) %>
-                <div class={["tabular-nums", issue.state == stage && "font-medium text-info"]}>
-                  {Format.duration(Pipeline.time_in(row.transitions, [stage], @now))}
-                </div>
-                <.model_tag :if={run} model={run.model} effort={run.effort} />
-              </td>
-              <td id={"issue-#{issue.id}-factory-time"} class="px-4 py-3 font-medium tabular-nums">
-                {Format.duration(Pipeline.time_in(row.transitions, Issue.factory_states(), @now))}
-              </td>
-              <td
-                id={"issue-#{issue.id}-waiting-time"}
-                class="px-4 py-3 tabular-nums text-base-content/60"
-              >
-                {Format.duration(Pipeline.time_in(row.transitions, Issue.waiting_states(), @now))}
-              </td>
-              <td class="px-4 py-3 text-right tabular-nums">{Format.cost(issue.cost_usd)}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+                </span>
+              </div>
+            </div>
+
+            <.stage_track
+              steps={Track.steps(issue, row.transitions, row.runs, @now)}
+              class="mt-4 lg:mt-0"
+            />
+
+            <div class="mt-4 flex items-end gap-5 lg:contents">
+              <.time_split
+                class="flex-1"
+                id_prefix={"issue-#{issue.id}-"}
+                factory={Pipeline.time_in(row.transitions, Issue.factory_states(), @now)}
+                waiting={Pipeline.time_in(row.transitions, Issue.waiting_states(), @now)}
+              />
+              <div class="shrink-0 text-right">
+                <div class="font-mono text-sm tabular-nums">{Format.cost(issue.cost_usd)}</div>
+                <div class="text-[11px] text-base-content/50">cost</div>
+              </div>
+            </div>
+          </.link>
+        </li>
+      </ul>
     </Layouts.app>
-    """
-  end
-
-  attr :id, :string, required: true
-  attr :label, :string, required: true
-  attr :value, :any, required: true
-  attr :tone, :string, required: true
-
-  defp tile(assigns) do
-    ~H"""
-    <div id={@id} class="rounded-xl border border-base-300 bg-base-100 px-4 py-3 shadow-sm">
-      <dt class="text-xs text-base-content/60">{@label}</dt>
-      <dd class={["mt-1 text-2xl font-semibold tabular-nums", @tone]}>{@value}</dd>
-    </div>
     """
   end
 end

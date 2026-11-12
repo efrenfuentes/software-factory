@@ -100,8 +100,8 @@ defmodule FactoryWeb.ProjectLive do
   @impl true
   def render(%{form: nil} = assigns) do
     ~H"""
-    <Layouts.app flash={@flash}>
-      <div class="flex items-end justify-between gap-4">
+    <Layouts.app flash={@flash} active={:projects}>
+      <div class="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 class="text-2xl font-semibold tracking-tight">Projects</h1>
           <p class="mt-1 text-sm text-base-content/60">Each project is one GitHub repository.</p>
@@ -114,53 +114,61 @@ defmodule FactoryWeb.ProjectLive do
       <div
         :if={@projects == []}
         id="no-projects"
-        class="mt-8 rounded-xl border border-dashed border-base-300 bg-base-100 px-6 py-16 text-center"
+        class="mt-6 rounded-lg border border-dashed border-base-300 bg-base-100 px-5 py-14 text-center"
       >
         <.icon name="hero-folder-plus" class="size-8 text-base-content/30" />
         <p class="mt-3 font-medium">No projects yet</p>
-        <p class="mt-1 text-sm text-base-content/60">
+        <p class="mx-auto mt-1 max-w-sm text-sm text-base-content/60">
           Add a repository to let the factory pick up its labelled issues.
         </p>
       </div>
 
-      <ul id="projects" class="mt-6 grid gap-3 md:grid-cols-2">
+      <ul id="projects" class="mt-5 grid gap-3 lg:grid-cols-2">
         <li :for={project <- @projects} id={"project-#{project.id}"}>
           <.link
             navigate={~p"/projects/#{project.id}/edit"}
-            class="block rounded-xl border border-base-300 bg-base-100 px-5 py-4 shadow-sm transition hover:-translate-y-0.5 hover:border-primary/50 hover:shadow"
+            class="group block h-full rounded-lg border border-base-300 bg-base-100 transition hover:border-base-content/40"
           >
-            <div class="flex items-center justify-between gap-3">
-              <span class="truncate font-semibold">{project.repo}</span>
+            <div class="flex items-start justify-between gap-3 px-4 pt-4">
+              <div class="min-w-0">
+                <div class="truncate font-mono text-sm font-medium transition group-hover:text-primary">
+                  {project.repo}
+                </div>
+                <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-base-content/60">
+                  <span>{String.capitalize(project.app_type)}</span>
+                  <span class="font-mono">{project.base_branch}</span>
+                  <span class="rounded border border-base-300 px-1.5 py-px font-mono">
+                    {project.trigger_label}
+                  </span>
+                </div>
+              </div>
               <span class={[
-                "rounded-full px-2 py-0.5 text-xs font-medium",
+                "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium",
                 if(project.enabled,
-                  do: "bg-success/15 text-success",
-                  else: "bg-base-300 text-base-content/60"
+                  do: "border-success/40 bg-success/10 text-success",
+                  else: "border-base-300 bg-base-200 text-base-content/60"
                 )
               ]}>
+                <span class="size-1.5 rounded-full bg-current" />
                 {if project.enabled, do: "Active", else: "Paused"}
               </span>
             </div>
-            <div class="mt-1 text-sm text-base-content/60">
-              {String.capitalize(project.app_type)} · label
-              <code class="text-xs">{project.trigger_label}</code>
-            </div>
-            <dl class="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+            <dl class="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 border-t border-base-300 px-4 py-3 text-xs">
               <dt class="text-base-content/50">Planner</dt>
               <dd><.model_tag model={project.planner_model} effort={project.planner_effort} /></dd>
               <dt class="text-base-content/50">Reviewer</dt>
               <dd><.model_tag model={project.reviewer_model} effort={project.reviewer_effort} /></dd>
               <dt class="text-base-content/50">Developer</dt>
-              <dd class="flex flex-wrap gap-x-3">
-                <span>
-                  hard <.model_tag model={project.dev_hard_model} effort={project.dev_hard_effort} />
-                </span>
-                <span>
-                  medium
-                  <.model_tag model={project.dev_medium_model} effort={project.dev_medium_effort} />
-                </span>
-                <span>
-                  easy <.model_tag model={project.dev_easy_model} effort={project.dev_easy_effort} />
+              <dd class="grid gap-1">
+                <span :for={
+                  {level, model, effort} <- [
+                    {"hard", project.dev_hard_model, project.dev_hard_effort},
+                    {"medium", project.dev_medium_model, project.dev_medium_effort},
+                    {"easy", project.dev_easy_model, project.dev_easy_effort}
+                  ]
+                }>
+                  <.model_tag model={model} effort={effort} />
+                  <span class="text-base-content/40">for {level}</span>
                 </span>
               </dd>
             </dl>
@@ -173,22 +181,24 @@ defmodule FactoryWeb.ProjectLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash}>
-      <div class="mx-auto max-w-3xl">
+    <Layouts.app flash={@flash} active={:projects}>
+      <div class="mx-auto max-w-4xl">
         <.link
           navigate={~p"/projects"}
-          class="inline-flex items-center gap-1 text-sm text-base-content/60 hover:text-base-content"
+          class="inline-flex min-h-8 items-center gap-1 rounded text-sm text-base-content/60 transition hover:text-base-content"
         >
           <.icon name="hero-arrow-left-micro" class="size-4" /> Projects
         </.link>
-        <h1 class="mt-3 text-2xl font-semibold tracking-tight">{@page_title}</h1>
+        <h1 class="mt-2 text-xl font-semibold tracking-tight [overflow-wrap:anywhere] sm:text-2xl">
+          {@page_title}
+        </h1>
 
         <.form
           for={@form}
           id="project-form"
           phx-change="validate"
           phx-submit="save"
-          class="mt-6 space-y-6"
+          class="mt-5 overflow-hidden rounded-lg border border-base-300 bg-base-100"
         >
           <.section
             title="Repository"
@@ -211,7 +221,7 @@ defmodule FactoryWeb.ProjectLive do
               label="People who can answer and approve"
               placeholder="login, another-login"
             />
-            <p class="-mt-1 text-xs text-base-content/50">
+            <p class="-mt-1.5 mb-3 text-xs text-base-content/60">
               GitHub logins, comma separated. Comments from anyone else are shown to the agents as context only.
             </p>
             <.input
@@ -227,9 +237,9 @@ defmodule FactoryWeb.ProjectLive do
           >
             <.role form={@form} label="Planner" prefix="planner" />
             <.role form={@form} label="Reviewer" prefix="reviewer" />
-            <.role form={@form} label="Developer · hard" prefix="dev_hard" />
-            <.role form={@form} label="Developer · medium" prefix="dev_medium" />
-            <.role form={@form} label="Developer · easy" prefix="dev_easy" />
+            <.role form={@form} label="Developer, hard issues" prefix="dev_hard" />
+            <.role form={@form} label="Developer, medium issues" prefix="dev_medium" />
+            <.role form={@form} label="Developer, easy issues" prefix="dev_easy" />
           </.section>
 
           <.section
@@ -272,16 +282,32 @@ defmodule FactoryWeb.ProjectLive do
             title="Checks"
             hint="Run after the Developer and before every review. Leave empty to use the stack's default."
           >
-            <.input field={@form[:setup_cmd]} label="Setup" placeholder={placeholder(@form, :setup)} />
-            <.input field={@form[:test_cmd]} label="Tests" placeholder={placeholder(@form, :test)} />
-            <.input field={@form[:lint_cmd]} label="Lint" placeholder={placeholder(@form, :lint)} />
+            <.input
+              field={@form[:setup_cmd]}
+              label="Setup"
+              placeholder={placeholder(@form, :setup)}
+              class="font-mono"
+            />
+            <.input
+              field={@form[:test_cmd]}
+              label="Tests"
+              placeholder={placeholder(@form, :test)}
+              class="font-mono"
+            />
+            <.input
+              field={@form[:lint_cmd]}
+              label="Lint"
+              placeholder={placeholder(@form, :lint)}
+              class="font-mono"
+            />
           </.section>
 
-          <div class="flex items-center justify-between">
+          <div class="flex flex-col-reverse gap-2 bg-base-200/50 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
             <.button
               :if={@live_action == :edit}
               id="delete-project"
               type="button"
+              variant="danger"
               phx-click="delete"
               data-confirm="Remove this project and the history of its issues?"
             >
@@ -302,13 +328,16 @@ defmodule FactoryWeb.ProjectLive do
   attr :hint, :string, required: true
   slot :inner_block, required: true
 
+  # Title and explanation on the left, fields on the right; stacked on small screens.
   defp section(assigns) do
     ~H"""
-    <fieldset class="rounded-xl border border-base-300 bg-base-100 px-5 py-4 shadow-sm">
+    <fieldset class="grid gap-x-8 gap-y-3 border-b border-base-300 px-4 py-5 sm:px-6 md:grid-cols-[14rem_minmax(0,1fr)]">
       <legend class="sr-only">{@title}</legend>
-      <h2 class="font-semibold">{@title}</h2>
-      <p class="mb-3 text-sm text-base-content/60">{@hint}</p>
-      {render_slot(@inner_block)}
+      <div>
+        <h2 class="font-semibold">{@title}</h2>
+        <p class="mt-1 text-sm text-base-content/60">{@hint}</p>
+      </div>
+      <div class="min-w-0">{render_slot(@inner_block)}</div>
     </fieldset>
     """
   end
@@ -325,8 +354,8 @@ defmodule FactoryWeb.ProjectLive do
       )
 
     ~H"""
-    <div class="grid grid-cols-[1fr_8rem] gap-x-4 sm:grid-cols-[10rem_1fr_8rem] sm:items-center">
-      <span class="col-span-2 text-sm font-medium sm:col-span-1">{@label}</span>
+    <div class="grid grid-cols-[minmax(0,1fr)_7rem] gap-x-3">
+      <span class="col-span-2 mb-1.5 text-sm font-medium">{@label}</span>
       <.input
         field={@model}
         type="select"

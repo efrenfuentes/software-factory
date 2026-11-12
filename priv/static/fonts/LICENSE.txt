@@ -1,0 +1,2 @@
+IBM Plex Sans and IBM Plex Mono, by IBM. SIL Open Font License 1.1.
+https://github.com/IBM/plex
