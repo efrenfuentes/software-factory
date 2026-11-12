@@ -24,6 +24,7 @@ defmodule Factory.Projects.Project do
     field :trigger_label, :string, default: "factory:ready"
     field :allowed_users, :string, default: ""
     field :enabled, :boolean, default: true
+    field :close_issue_on_merge, :boolean, default: true
 
     field :planner_model, :string, default: "claude-opus-5-5"
     field :planner_effort, :string, default: "high"
@@ -67,6 +68,7 @@ defmodule Factory.Projects.Project do
         :trigger_label,
         :allowed_users,
         :enabled,
+        :close_issue_on_merge,
         :max_plan_rounds,
         :max_pr_rounds,
         :plan_approval,

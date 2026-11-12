@@ -2,6 +2,7 @@ defmodule FactoryWeb.ProjectLive do
   @moduledoc "The repositories the factory works on and how: stack, people, and the model for each role."
   use FactoryWeb, :live_view
   alias Factory.{GitHub, Projects, Stacks}
+  alias Factory.Accounts.Scope
   alias Factory.Projects.Project
   alias FactoryWeb.Format
 
@@ -53,7 +54,14 @@ defmodule FactoryWeb.ProjectLive do
     {:noreply, assign(socket, :form, to_form(changeset))}
   end
 
-  def handle_event("save", %{"project" => params}, socket) do
+  # The routes keep others away from the form, but not from sending its events.
+  def handle_event(event, params, socket) when event in ~w(save delete) do
+    if Scope.can?(socket.assigns.current_scope, :manage) and socket.assigns.form,
+      do: manage(event, params, socket),
+      else: {:noreply, put_flash(socket, :error, "Only administrators can change projects.")}
+  end
+
+  defp manage("save", %{"project" => params}, socket) do
     result =
       if socket.assigns.live_action == :new,
         do: Projects.create_project(params),
@@ -69,7 +77,7 @@ defmodule FactoryWeb.ProjectLive do
     end
   end
 
-  def handle_event("delete", _params, socket) do
+  defp manage("delete", _params, socket) do
     {:ok, _} = Projects.delete_project(socket.assigns.project)
     {:noreply, socket |> put_flash(:info, "Project removed.") |> push_navigate(to: ~p"/projects")}
   end
@@ -100,13 +108,18 @@ defmodule FactoryWeb.ProjectLive do
   @impl true
   def render(%{form: nil} = assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active={:projects}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} active={:projects}>
       <div class="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 class="text-2xl font-semibold tracking-tight">Projects</h1>
           <p class="mt-1 text-sm text-base-content/60">Each project is one GitHub repository.</p>
         </div>
-        <.button id="new-project" variant="primary" navigate={~p"/projects/new"}>
+        <.button
+          :if={Scope.can?(@current_scope, :manage)}
+          id="new-project"
+          variant="primary"
+          navigate={~p"/projects/new"}
+        >
           <.icon name="hero-plus-micro" class="size-4" /> Add project
         </.button>
       </div>
@@ -126,53 +139,18 @@ defmodule FactoryWeb.ProjectLive do
       <ul id="projects" class="mt-5 grid gap-3 lg:grid-cols-2">
         <li :for={project <- @projects} id={"project-#{project.id}"}>
           <.link
+            :if={Scope.can?(@current_scope, :manage)}
             navigate={~p"/projects/#{project.id}/edit"}
             class="group block h-full rounded-lg border border-base-300 bg-base-100 transition hover:border-base-content/40"
           >
-            <div class="flex items-start justify-between gap-3 px-4 pt-4">
-              <div class="min-w-0">
-                <div class="truncate font-mono text-sm font-medium transition group-hover:text-primary">
-                  {project.repo}
-                </div>
-                <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-base-content/60">
-                  <span>{String.capitalize(project.app_type)}</span>
-                  <span class="font-mono">{project.base_branch}</span>
-                  <span class="rounded border border-base-300 px-1.5 py-px font-mono">
-                    {project.trigger_label}
-                  </span>
-                </div>
-              </div>
-              <span class={[
-                "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium",
-                if(project.enabled,
-                  do: "border-success/40 bg-success/10 text-success",
-                  else: "border-base-300 bg-base-200 text-base-content/60"
-                )
-              ]}>
-                <span class="size-1.5 rounded-full bg-current" />
-                {if project.enabled, do: "Active", else: "Paused"}
-              </span>
-            </div>
-            <dl class="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 border-t border-base-300 px-4 py-3 text-xs">
-              <dt class="text-base-content/50">Planner</dt>
-              <dd><.model_tag model={project.planner_model} effort={project.planner_effort} /></dd>
-              <dt class="text-base-content/50">Reviewer</dt>
-              <dd><.model_tag model={project.reviewer_model} effort={project.reviewer_effort} /></dd>
-              <dt class="text-base-content/50">Developer</dt>
-              <dd class="grid gap-1">
-                <span :for={
-                  {level, model, effort} <- [
-                    {"hard", project.dev_hard_model, project.dev_hard_effort},
-                    {"medium", project.dev_medium_model, project.dev_medium_effort},
-                    {"easy", project.dev_easy_model, project.dev_easy_effort}
-                  ]
-                }>
-                  <.model_tag model={model} effort={effort} />
-                  <span class="text-base-content/40">for {level}</span>
-                </span>
-              </dd>
-            </dl>
+            <.project_card project={project} />
           </.link>
+          <div
+            :if={not Scope.can?(@current_scope, :manage)}
+            class="h-full rounded-lg border border-base-300 bg-base-100"
+          >
+            <.project_card project={project} />
+          </div>
         </li>
       </ul>
     </Layouts.app>
@@ -181,7 +159,7 @@ defmodule FactoryWeb.ProjectLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active={:projects}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} active={:projects}>
       <div class="mx-auto max-w-4xl">
         <.link
           navigate={~p"/projects"}
@@ -229,6 +207,15 @@ defmodule FactoryWeb.ProjectLive do
               type="checkbox"
               label="Pick up issues from this repository"
             />
+            <.input
+              field={@form[:close_issue_on_merge]}
+              type="checkbox"
+              label="Close the issue when its pull request is merged"
+            />
+            <p class="-mt-1.5 text-xs text-base-content/60">
+              When off, the issue stays open with the label <code class="font-mono">factory:merged</code>,
+              for repositories that close issues at release.
+            </p>
           </.section>
 
           <.section
@@ -321,6 +308,56 @@ defmodule FactoryWeb.ProjectLive do
         </.form>
       </div>
     </Layouts.app>
+    """
+  end
+
+  attr :project, Project, required: true
+
+  defp project_card(assigns) do
+    ~H"""
+    <div class="flex items-start justify-between gap-3 px-4 pt-4">
+      <div class="min-w-0">
+        <div class="truncate font-mono text-sm font-medium transition group-hover:text-primary">
+          {@project.repo}
+        </div>
+        <div class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-base-content/60">
+          <span>{String.capitalize(@project.app_type)}</span>
+          <span class="font-mono">{@project.base_branch}</span>
+          <span class="rounded border border-base-300 px-1.5 py-px font-mono">
+            {@project.trigger_label}
+          </span>
+        </div>
+      </div>
+      <span class={[
+        "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium",
+        if(@project.enabled,
+          do: "border-success/40 bg-success/10 text-success",
+          else: "border-base-300 bg-base-200 text-base-content/60"
+        )
+      ]}>
+        <span class="size-1.5 rounded-full bg-current" />
+        {if @project.enabled, do: "Active", else: "Paused"}
+      </span>
+    </div>
+    <dl class="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 border-t border-base-300 px-4 py-3 text-xs">
+      <dt class="text-base-content/50">Planner</dt>
+      <dd><.model_tag model={@project.planner_model} effort={@project.planner_effort} /></dd>
+      <dt class="text-base-content/50">Reviewer</dt>
+      <dd><.model_tag model={@project.reviewer_model} effort={@project.reviewer_effort} /></dd>
+      <dt class="text-base-content/50">Developer</dt>
+      <dd class="grid gap-1">
+        <span :for={
+          {level, model, effort} <- [
+            {"hard", @project.dev_hard_model, @project.dev_hard_effort},
+            {"medium", @project.dev_medium_model, @project.dev_medium_effort},
+            {"easy", @project.dev_easy_model, @project.dev_easy_effort}
+          ]
+        }>
+          <.model_tag model={model} effort={effort} />
+          <span class="text-base-content/40">for {level}</span>
+        </span>
+      </dd>
+    </dl>
     """
   end
 

@@ -30,6 +30,26 @@ mix phx.server   # http://localhost:4000
 2. Pon la etiqueta `factory:ready` (configurable) a un issue. La factory lo recoge en
    menos de un minuto.
 
+## Usuarios y permisos
+
+Hay que iniciar sesión para ver cualquier página. La primera vez que abres la factory
+(sin usuarios) te pide crear el primer administrador; después nadie puede registrarse
+por su cuenta: los usuarios se crean en **Users**, con nombre, apellidos, correo,
+contraseña (mínimo 12 caracteres) y un nivel de acceso:
+
+| Nivel | Puede |
+| --- | --- |
+| Administrator | Todo: proyectos, usuarios y acciones sobre los issues |
+| Operator | Aprobar planes, pedir cambios, reintentar y detener issues. No cambia proyectos ni usuarios |
+| Read only | Ver todo, sin cambiar nada |
+
+- Cada persona cambia su contraseña en su cuenta (el círculo con sus iniciales).
+- Cambiar el nivel, la contraseña o desactivar a alguien cierra todas sus sesiones.
+- Siempre debe quedar un administrador activo.
+- Las acciones hechas desde el panel quedan con el nombre de quien las hizo. Los
+  comentarios en GitHub salen todos con la cuenta de `gh` de la máquina, así que al
+  pedir cambios a un plan se añade al comentario quién lo escribió.
+
 ## Flujo
 
 ```
@@ -60,6 +80,22 @@ ready_to_merge ──merge de una persona──▶ done
 
 Spec, plan y tareas quedan en la rama del issue, en `.factory/issue-N/`, y forman parte
 del PR.
+
+## Estado en GitHub
+
+La factory refleja el avance en el propio issue, para cualquier rama base:
+
+| Momento | En el issue |
+| --- | --- |
+| Al recogerlo, y mientras se planifica y desarrolla | etiqueta `factory:in-progress` |
+| Desde que se abre el PR | etiqueta `factory:in-review` |
+| PR mergeado | se quitan las etiquetas y se cierra el issue con un comentario |
+| PR cerrado sin merge, o issue detenido | se quitan las etiquetas; el issue queda abierto |
+
+GitHub solo cierra issues por sí mismo (`Closes #N`) cuando el PR va a la rama por
+defecto; por eso la factory lo hace explícitamente. Si en el proyecto desmarcas
+"Close the issue when its pull request is merged", el issue queda abierto con la
+etiqueta `factory:merged`.
 
 ## Plan en el panel
 

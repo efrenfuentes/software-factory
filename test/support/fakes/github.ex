@@ -54,6 +54,13 @@ defmodule Factory.Fakes.GitHub do
   def set_pr_state(number, state), do: State.update(:prs, &put_in(&1, [number, :state], state))
 
   @impl true
+  def close_issue(_repo, number, comment) do
+    State.update(:comments, &[{number, comment} | &1])
+    State.update(:issues, &Map.update!(&1, number, fn issue -> %{issue | state: "CLOSED"} end))
+    :ok
+  end
+
+  @impl true
   def set_label(_repo, number, label, present?) do
     State.update(:labels, fn labels ->
       set = Map.get(labels, number, MapSet.new())

@@ -35,4 +35,23 @@ defmodule FactoryWeb.ConnCase do
     Factory.DataCase.setup_sandbox(tags)
     {:ok, conn: Phoenix.ConnTest.build_conn()}
   end
+
+  @doc """
+  Setup helper that signs in a user with the role given in the `:role` tag
+  (an administrator by default):
+
+      setup :sign_in
+  """
+  def sign_in(%{conn: conn} = context) do
+    user = Factory.AccountsFixtures.user_fixture(role: context[:role] || "admin")
+    %{conn: log_in_user(conn, user), user: user}
+  end
+
+  def log_in_user(conn, user) do
+    token = Factory.Accounts.create_session(user)
+
+    conn
+    |> Phoenix.ConnTest.init_test_session(%{})
+    |> Plug.Conn.put_session(:user_token, token)
+  end
 end

@@ -64,7 +64,7 @@ defmodule FactoryWeb.DashboardLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active={:issues}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} active={:issues}>
       <h1 class="text-2xl font-semibold tracking-tight">Issues</h1>
       <p class="mt-1 max-w-prose text-sm text-base-content/60">
         GitHub is checked every minute for labelled issues, answers and merged pull requests.

@@ -157,6 +157,8 @@ defmodule Factory.Pipeline do
           else: attrs
       end)
 
+    before = issue
+
     {:ok, issue} =
       Repo.transaction(fn ->
         from(t in Transition, where: t.issue_id == ^issue.id and is_nil(t.left_at))
@@ -170,6 +172,7 @@ defmodule Factory.Pipeline do
       %{issue_id: issue.id, state: state} |> Factory.Workers.StageWorker.new() |> Oban.insert!()
     end
 
+    Factory.Pipeline.GitHubStatus.sync(before, issue)
     broadcast(issue.id)
     {:ok, issue}
   end
@@ -216,11 +219,13 @@ defmodule Factory.Pipeline do
   A person lets the issue continue: approves the plan, grants one more review
   round after the limit was reached, or retries after a failure.
   """
-  def approve(%Issue{state: "awaiting_plan_approval"} = issue) do
-    transition(issue, "developing", %{}, "Plan approved by a person")
+  def approve(issue, actor \\ "a person")
+
+  def approve(%Issue{state: "awaiting_plan_approval"} = issue, actor) do
+    transition(issue, "developing", %{}, "Plan approved by #{actor}")
   end
 
-  def approve(%Issue{state: state, resume_state: resume} = issue)
+  def approve(%Issue{state: state, resume_state: resume} = issue, actor)
       when state in ["needs_human", "failed"] and is_binary(resume) do
     attrs =
       case issue.hold_reason do
@@ -230,10 +235,10 @@ defmodule Factory.Pipeline do
       end
 
     attrs = Map.merge(attrs, %{hold_reason: nil, hold_detail: nil, resume_state: nil})
-    transition(issue, resume, attrs, "Continued by a person")
+    transition(issue, resume, attrs, "Continued by #{actor}")
   end
 
-  def approve(%Issue{}), do: {:error, :not_waiting_for_approval}
+  def approve(%Issue{}, _actor), do: {:error, :not_waiting_for_approval}
 
   def cancel(%Issue{} = issue, note \\ "Stopped by a person") do
     if Issue.terminal?(issue), do: {:ok, issue}, else: transition(issue, "cancelled", %{}, note)

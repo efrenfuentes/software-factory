@@ -97,23 +97,33 @@ defmodule Factory.Pipeline.Poller do
   end
 
   @doc "Stops work on an issue for good, from the UI."
-  def stop(%Issue{} = issue),
-    do: finish(Repo.preload(issue, :project), "cancelled", "Stopped by a person")
+  def stop(%Issue{} = issue, actor \\ "a person"),
+    do: finish(Repo.preload(issue, :project), "cancelled", "Stopped by #{actor}")
 
   @doc """
   A person asks for changes to the plan from the UI. Their feedback is posted on
   the issue unsigned, as their own comment, so the Planner reads it as a
   maintainer's decision; the plan is then revised right away.
   """
-  def request_plan_changes(%Issue{state: "awaiting_plan_approval"} = issue, feedback) do
-    issue = Repo.preload(issue, :project)
+  def request_plan_changes(issue, feedback, actor \\ nil)
 
-    with :ok <- GitHub.impl().comment(issue.project.repo, issue.number, feedback) do
-      Pipeline.transition(issue, "planning", %{}, "Feedback on the plan received")
+  def request_plan_changes(%Issue{state: "awaiting_plan_approval"} = issue, feedback, actor) do
+    issue = Repo.preload(issue, :project)
+    # Everyone posts through the same GitHub account, so the comment says who wrote it.
+    body =
+      if actor, do: "#{feedback}\n\n_Sent from Software Factory by #{actor}._", else: feedback
+
+    with :ok <- GitHub.impl().comment(issue.project.repo, issue.number, body) do
+      note =
+        if actor,
+          do: "Changes to the plan requested by #{actor}",
+          else: "Feedback on the plan received"
+
+      Pipeline.transition(issue, "planning", %{}, note)
     end
   end
 
-  def request_plan_changes(%Issue{}, _feedback), do: {:error, :not_waiting_for_approval}
+  def request_plan_changes(%Issue{}, _feedback, _actor), do: {:error, :not_waiting_for_approval}
 
   defp resume(issue, fun) do
     GitHub.impl().set_label(issue.project.repo, issue.number, Stages.needs_human_label(), false)

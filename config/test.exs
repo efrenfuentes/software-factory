@@ -36,6 +36,9 @@ config :phoenix, :plug_init_mode, :runtime
 config :phoenix_live_view,
   enable_expensive_runtime_checks: true
 
+# Only in tests: make password hashing fast.
+config :bcrypt_elixir, :log_rounds, 1
+
 config :factory, Oban, testing: :manual
 
 config :factory,

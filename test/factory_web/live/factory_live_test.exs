@@ -6,6 +6,8 @@ defmodule FactoryWeb.FactoryLiveTest do
   alias Factory.{Pipeline, Projects}
   alias Factory.Pipeline.Stages
 
+  setup :sign_in
+
   setup do
     Fakes.State.reset()
     :ok
@@ -168,8 +170,8 @@ defmodule FactoryWeb.FactoryLiveTest do
     |> form("#plan-feedback-form", review: %{feedback: "Use JSON, not CSV"})
     |> render_submit()
 
-    # Posted as the person's own comment, without the factory's marker.
-    assert {7, "Use JSON, not CSV"} in Fakes.GitHub.posted()
+    # Posted as a person's comment, without the factory's marker, saying who wrote it.
+    assert {7, "Use JSON, not CSV\n\n_Sent from Software Factory by Ana Pérez._"} in Fakes.GitHub.posted()
     assert Pipeline.get_issue!(issue.id).state == "planning"
     refute has_element?(view, "#plan-feedback-form")
 

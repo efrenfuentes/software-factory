@@ -3,6 +3,12 @@ defmodule Factory.GitHub.CLI do
   @behaviour Factory.GitHub
   alias Factory.Shell
 
+  @label_colors %{
+    "factory:in-progress" => "2B50E6",
+    "factory:in-review" => "8250DF",
+    "factory:merged" => "0B8A68"
+  }
+
   @impl true
   def list_issues(repo, label) do
     args =
@@ -79,7 +85,8 @@ defmodule Factory.GitHub.CLI do
 
   @impl true
   def set_label(repo, number, label, true) do
-    Shell.run("gh", ~w(label create #{label} -R #{repo} --force --color D93F0B))
+    color = Map.get(@label_colors, label, "D93F0B")
+    Shell.run("gh", ~w(label create #{label} -R #{repo} --force --color #{color}))
     Shell.run("gh", ~w(issue edit #{number} -R #{repo} --add-label #{label}))
     :ok
   end
@@ -87,6 +94,14 @@ defmodule Factory.GitHub.CLI do
   def set_label(repo, number, label, false) do
     Shell.run("gh", ~w(issue edit #{number} -R #{repo} --remove-label #{label}))
     :ok
+  end
+
+  @impl true
+  def close_issue(repo, number, comment) do
+    case Shell.run("gh", ~w(issue close #{number} -R #{repo} --comment) ++ [comment]) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, Shell.describe(reason)}
+    end
   end
 
   @impl true

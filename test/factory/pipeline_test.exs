@@ -181,6 +181,72 @@ defmodule Factory.PipelineTest do
     assert Pipeline.time_in(transitions, ["pr_review"], now) == nil
   end
 
+  describe "status on GitHub" do
+    test "in progress from pickup, in review once the pull request is open, closed on merge", %{
+      project: project
+    } do
+      Fakes.Agent.script(:planner, [
+        planner(%{"status" => "questions", "questions" => ["Which?"]})
+      ])
+
+      issue = project |> track() |> drive()
+
+      # Waiting for answers is still in progress.
+      assert issue.state == "awaiting_answers"
+      assert "factory:in-progress" in Fakes.GitHub.labels(7)
+
+      Fakes.Agent.script(:planner, [planner(%{})])
+      Fakes.GitHub.add_comment(7, "maintainer", "The first one")
+      issue = issue |> poll() |> drive()
+
+      assert issue.state == "ready_to_merge"
+      assert "factory:in-review" in Fakes.GitHub.labels(7)
+      refute "factory:in-progress" in Fakes.GitHub.labels(7)
+
+      Fakes.GitHub.set_pr_state(100, "MERGED")
+      assert poll(issue).state == "done"
+
+      assert {:ok, %{state: "CLOSED"}} = Fakes.GitHub.get_issue("acme/app", 7)
+
+      assert Enum.any?(
+               Fakes.GitHub.posted(),
+               &match?({7, "Pull request #100 was merged" <> _}, &1)
+             )
+
+      refute Enum.any?(Fakes.GitHub.labels(7), &String.starts_with?(&1, "factory:in-"))
+    end
+
+    test "a project can keep the issue open after the merge", %{project: project} do
+      {:ok, project} = Projects.update_project(project, %{close_issue_on_merge: false})
+      issue = project |> track() |> drive()
+
+      Fakes.GitHub.set_pr_state(100, "MERGED")
+      assert poll(issue).state == "done"
+
+      assert {:ok, %{state: "OPEN"}} = Fakes.GitHub.get_issue("acme/app", 7)
+      assert "factory:merged" in Fakes.GitHub.labels(7)
+      refute "factory:in-review" in Fakes.GitHub.labels(7)
+    end
+
+    test "stopping removes the status and leaves the issue open", %{project: project} do
+      issue = project |> track() |> drive()
+      assert "factory:in-review" in Fakes.GitHub.labels(7)
+
+      assert {:ok, %{state: "cancelled"}} = Poller.stop(issue)
+      assert {:ok, %{state: "OPEN"}} = Fakes.GitHub.get_issue("acme/app", 7)
+      refute Enum.any?(Fakes.GitHub.labels(7), &String.starts_with?(&1, "factory:in-"))
+    end
+
+    test "a pull request under revision stays in review" do
+      alias Factory.Pipeline.GitHubStatus
+
+      assert GitHubStatus.label(%Issue{state: "developing"}) == "factory:in-progress"
+      assert GitHubStatus.label(%Issue{state: "developing", pr_number: 9}) == "factory:in-review"
+      assert GitHubStatus.label(%Issue{state: "needs_human"}) == "factory:in-progress"
+      assert GitHubStatus.label(%Issue{state: "done", pr_number: 9}) == nil
+    end
+  end
+
   test "the reviewer can run on Codex, the other roles only on Claude", %{project: project} do
     assert %{claude: _, codex: _} = Application.fetch_env!(:factory, :agent_runners)
     assert Factory.Agents.provider("gpt-6-astra") == :codex

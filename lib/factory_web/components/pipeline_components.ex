@@ -193,6 +193,22 @@ defmodule FactoryWeb.PipelineComponents do
     """
   end
 
+  attr :role, :string, required: true
+
+  @doc "What a user may do, in one word."
+  def role_badge(assigns) do
+    ~H"""
+    <span class={[
+      "inline-flex items-center whitespace-nowrap rounded border px-1.5 py-px font-mono text-[11px]",
+      @role == "admin" && "border-primary/40 text-primary",
+      @role == "operator" && "border-success/40 text-success",
+      @role == "viewer" && "border-base-300 text-base-content/60"
+    ]}>
+      {Format.role(@role)}
+    </span>
+    """
+  end
+
   attr :id, :string, default: nil
   attr :class, :any, default: nil
   slot :inner_block, required: true

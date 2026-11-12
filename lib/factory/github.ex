@@ -27,6 +27,8 @@ defmodule Factory.GitHub do
               label :: String.t(),
               present? :: boolean()
             ) :: :ok
+  @callback close_issue(repo :: String.t(), number :: integer(), comment :: String.t()) ::
+              :ok | {:error, term()}
   @callback current_user() :: {:ok, String.t()} | {:error, term()}
 
   def impl, do: Application.fetch_env!(:factory, :github)

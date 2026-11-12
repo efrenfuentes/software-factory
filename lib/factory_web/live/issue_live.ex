@@ -3,6 +3,7 @@ defmodule FactoryWeb.IssueLive do
   use FactoryWeb, :live_view
   alias Factory.Pipeline
   alias Factory.Pipeline.{Issue, Poller}
+  alias Factory.Accounts.Scope
   alias Factory.Workspace
   alias FactoryWeb.{Format, Track}
 
@@ -16,6 +17,7 @@ defmodule FactoryWeb.IssueLive do
     {:ok,
      socket
      |> assign(now: DateTime.utc_now(), plan_tab: nil, plan_choice: nil)
+     |> assign(can_operate: Scope.can?(socket.assigns.current_scope, :operate))
      |> assign(feedback: feedback_form(""))
      |> load(String.to_integer(id))}
   end
@@ -54,9 +56,15 @@ defmodule FactoryWeb.IssueLive do
     {:noreply, if(id == socket.assigns.issue.id, do: load(socket, id), else: socket)}
   end
 
+  # Reading is open to everyone signed in; acting on the issue is not.
   @impl true
+  def handle_event(event, _params, %{assigns: %{can_operate: false}} = socket)
+      when event in ~w(approve request_changes stop) do
+    {:noreply, put_flash(socket, :error, "Your account can only read.")}
+  end
+
   def handle_event("approve", _params, socket) do
-    case Pipeline.approve(socket.assigns.issue) do
+    case Pipeline.approve(socket.assigns.issue, actor(socket)) do
       {:ok, issue} ->
         {:noreply,
          socket
@@ -93,7 +101,7 @@ defmodule FactoryWeb.IssueLive do
         {:noreply, put_flash(socket, :error, "Write what should change in the plan.")}
 
       true ->
-        case Poller.request_plan_changes(socket.assigns.issue, text) do
+        case Poller.request_plan_changes(socket.assigns.issue, text, actor(socket)) do
           {:ok, issue} ->
             {:noreply,
              socket
@@ -111,9 +119,11 @@ defmodule FactoryWeb.IssueLive do
   end
 
   def handle_event("stop", _params, socket) do
-    {:ok, issue} = Poller.stop(socket.assigns.issue)
+    {:ok, issue} = Poller.stop(socket.assigns.issue, actor(socket))
     {:noreply, socket |> put_flash(:info, "Stopped.") |> load(issue.id)}
   end
+
+  defp actor(socket), do: Scope.name(socket.assigns.current_scope)
 
   defp feedback_form(text), do: to_form(%{"feedback" => text}, as: :review)
 
@@ -134,7 +144,7 @@ defmodule FactoryWeb.IssueLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active={:issues}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} active={:issues}>
       <.link
         navigate={~p"/"}
         class="inline-flex min-h-8 items-center gap-1 rounded text-sm text-base-content/60 transition hover:text-base-content"
@@ -175,7 +185,7 @@ defmodule FactoryWeb.IssueLive do
             </a>
           </div>
         </div>
-        <div class="flex shrink-0 gap-2">
+        <div :if={@can_operate} class="flex shrink-0 gap-2">
           <.button
             :if={approve_label(@issue)}
             id="approve-button"
@@ -307,7 +317,7 @@ defmodule FactoryWeb.IssueLive do
           />
 
           <.form
-            :if={@issue.state == "awaiting_plan_approval"}
+            :if={@can_operate and @issue.state == "awaiting_plan_approval"}
             for={@feedback}
             id="plan-feedback-form"
             phx-change="feedback_changed"

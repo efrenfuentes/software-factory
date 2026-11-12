@@ -52,6 +52,11 @@ defmodule FactoryWeb.Format do
   @doc "Seconds between two instants; an open period runs until `now`."
   def seconds(from, to, now), do: max(DateTime.diff(to || now, from, :second), 0)
 
+  def role("admin"), do: "administrator"
+  def role("operator"), do: "operator"
+  def role("viewer"), do: "read only"
+  def role(other), do: other
+
   def model(nil), do: nil
 
   def model("claude-" <> rest) do
