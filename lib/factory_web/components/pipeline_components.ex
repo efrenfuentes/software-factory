@@ -26,6 +26,16 @@ defmodule FactoryWeb.PipelineComponents do
     """
   end
 
+  attr :text, :string, required: true
+  attr :class, :any, default: nil
+
+  @doc "Text written by an agent, rendered from Markdown."
+  def markdown(assigns) do
+    ~H"""
+    <div class={["markdown", @class]}>{FactoryWeb.Markdown.to_html(@text)}</div>
+    """
+  end
+
   attr :model, :string, default: nil
   attr :effort, :string, default: nil
 

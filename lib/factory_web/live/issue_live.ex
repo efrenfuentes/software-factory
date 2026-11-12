@@ -223,12 +223,16 @@ defmodule FactoryWeb.IssueLive do
                   {String.replace(run.output["verdict"], "_", " ")}
                 </span>
               </div>
-              <p :if={run.summary} class="mt-2 text-sm text-base-content/80">{run.summary}</p>
+              <.markdown
+                :if={run.summary}
+                text={run.summary}
+                class="run-summary mt-2 text-sm text-base-content/80"
+              />
               <ul
                 :if={run.output && (run.output["blocking"] || []) != []}
                 class="mt-2 list-disc space-y-1 pl-5 text-sm text-base-content/80"
               >
-                <li :for={item <- run.output["blocking"]}>{item}</li>
+                <li :for={item <- run.output["blocking"]}><.markdown text={item} /></li>
               </ul>
             </li>
           </ol>
