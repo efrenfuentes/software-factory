@@ -60,16 +60,6 @@ defmodule FactoryWeb.DashboardLive do
     end
   end
 
-  defp spent(transitions, states, now) do
-    transitions
-    |> Enum.filter(&(&1.state in states))
-    |> Enum.map(&Format.seconds(&1.entered_at, &1.left_at, now))
-    |> case do
-      [] -> nil
-      seconds -> Enum.sum(seconds)
-    end
-  end
-
   defp last_run(runs, stage), do: runs |> Enum.filter(&(&1.stage == stage)) |> List.last()
 
   @impl true
@@ -114,13 +104,14 @@ defmodule FactoryWeb.DashboardLive do
         :if={@rows != []}
         class="mt-6 overflow-x-auto rounded-xl border border-base-300 bg-base-100 shadow-sm"
       >
-        <table id="issues" class="w-full min-w-[64rem] text-left text-sm">
+        <table id="issues" class="w-full min-w-[72rem] text-left text-sm">
           <thead class="border-b border-base-300 text-xs uppercase tracking-wide text-base-content/50">
             <tr>
               <th class="px-4 py-3 font-medium">Issue</th>
               <th class="px-4 py-3 font-medium">Stage</th>
               <th :for={{label, _} <- @phases} class="px-4 py-3 font-medium">{label}</th>
-              <th class="px-4 py-3 font-medium">Waiting</th>
+              <th class="px-4 py-3 font-medium">Factory time</th>
+              <th class="px-4 py-3 font-medium">Waiting on people</th>
               <th class="px-4 py-3 text-right font-medium">Cost</th>
             </tr>
           </thead>
@@ -156,12 +147,18 @@ defmodule FactoryWeb.DashboardLive do
               <td :for={{_, stage} <- @phases} class="px-4 py-3">
                 <% run = last_run(row.runs, stage) %>
                 <div class={["tabular-nums", issue.state == stage && "font-medium text-info"]}>
-                  {Format.duration(spent(row.transitions, [stage], @now))}
+                  {Format.duration(Pipeline.time_in(row.transitions, [stage], @now))}
                 </div>
                 <.model_tag :if={run} model={run.model} effort={run.effort} />
               </td>
-              <td class="px-4 py-3 tabular-nums text-base-content/70">
-                {Format.duration(spent(row.transitions, Issue.waiting_states(), @now))}
+              <td id={"issue-#{issue.id}-factory-time"} class="px-4 py-3 font-medium tabular-nums">
+                {Format.duration(Pipeline.time_in(row.transitions, Issue.factory_states(), @now))}
+              </td>
+              <td
+                id={"issue-#{issue.id}-waiting-time"}
+                class="px-4 py-3 tabular-nums text-base-content/60"
+              >
+                {Format.duration(Pipeline.time_in(row.transitions, Issue.waiting_states(), @now))}
               </td>
               <td class="px-4 py-3 text-right tabular-nums">{Format.cost(issue.cost_usd)}</td>
             </tr>

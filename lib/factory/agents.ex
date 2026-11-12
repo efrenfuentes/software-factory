@@ -25,7 +25,12 @@ defmodule Factory.Agents do
 
   @callback run(request) :: {:ok, result} | {:error, String.t()}
 
-  def impl, do: Application.fetch_env!(:factory, :agent_runner)
+  @doc "Which CLI runs a model: `:codex` for OpenAI models, `:claude` for the rest."
+  def provider("gpt-" <> _), do: :codex
+  def provider(_model), do: :claude
+
+  def impl(model),
+    do: Application.fetch_env!(:factory, :agent_runners) |> Map.fetch!(provider(model))
 
   @doc """
   `tier` only matters for the developer: it is the difficulty whose model to use.
@@ -61,7 +66,7 @@ defmodule Factory.Agents do
       max_budget_usd: project.max_budget_usd
     }
 
-    case impl().run(request) do
+    case impl(model).run(request) do
       {:ok, result} ->
         Pipeline.finish_run(run, "ok", %{
           output: result.output,

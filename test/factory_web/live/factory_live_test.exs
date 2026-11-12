@@ -48,14 +48,30 @@ defmodule FactoryWeb.FactoryLiveTest do
     assert view |> form("#project-form", project: %{repo: "not a repo"}) |> render_change() =~
              "must look like owner/name"
 
+    # Codex models are offered for the Reviewer only.
+    assert has_element?(
+             view,
+             "select[name='project[reviewer_model]'] option[value='gpt-6-astra']"
+           )
+
+    refute has_element?(view, "select[name='project[planner_model]'] option[value='gpt-6-astra']")
+
     view
-    |> form("#project-form", project: %{repo: "acme/api", app_type: "rails"})
+    |> form("#project-form",
+      project: %{repo: "acme/api", app_type: "rails", reviewer_model: "gpt-6.1-sol"}
+    )
     |> render_submit()
 
     assert_redirect(view, ~p"/projects")
 
-    assert [%{repo: "acme/api", app_type: "rails", dev_easy_model: "claude-sonnet-5-5"}] =
-             Projects.list_projects()
+    assert [
+             %{
+               repo: "acme/api",
+               app_type: "rails",
+               dev_easy_model: "claude-sonnet-5-5",
+               reviewer_model: "gpt-6.1-sol"
+             }
+           ] = Projects.list_projects()
   end
 
   test "the dashboard lists an issue with its stage and the model of each stage", %{conn: conn} do
@@ -71,6 +87,12 @@ defmodule FactoryWeb.FactoryLiveTest do
     assert has_element?(view, "#issue-#{issue.id}", "Ready to merge")
     assert has_element?(view, "#issue-#{issue.id}", "Sonnet 5.5")
     assert has_element?(view, "#stat-waiting", "1")
+    assert has_element?(view, "#issue-#{issue.id}-factory-time")
+    assert has_element?(view, "#issue-#{issue.id}-waiting-time")
+
+    {:ok, view, _html} = live(conn, ~p"/issues/#{issue.id}")
+    assert has_element?(view, "#factory-time")
+    assert has_element?(view, "#waiting-time")
   end
 
   test "a person can allow one more round from the issue page", %{conn: conn} do

@@ -82,7 +82,12 @@ defmodule Factory.Shell do
       System.cmd("kill", ["-TERM", to_string(pid)], stderr_to_stdout: true)
     end
 
-    if Port.info(port), do: Port.close(port)
+    # The port may close by itself once the process dies, between the check and the close.
+    try do
+      Port.close(port)
+    rescue
+      ArgumentError -> :ok
+    end
   end
 
   @doc "Human-readable description of a failed `run/3`."

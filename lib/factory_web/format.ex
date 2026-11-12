@@ -60,6 +60,12 @@ defmodule FactoryWeb.Format do
     end
   end
 
+  def model("gpt-" <> rest) do
+    case String.split(rest, "-") do
+      [version | name] -> Enum.join(["GPT", version | Enum.map(name, &String.capitalize/1)], " ")
+    end
+  end
+
   def model(other), do: other
 
   def cost(nil), do: "—"

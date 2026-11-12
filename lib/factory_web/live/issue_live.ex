@@ -142,23 +142,21 @@ defmodule FactoryWeb.IssueLive do
         >{@issue.hold_detail}</pre>
       </div>
 
-      <dl class="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <dl class="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <.fact
           label="Plan review rounds"
           value={"#{@issue.plan_round} of #{@issue.plan_round_limit}"}
         />
         <.fact label="PR review rounds" value={"#{@issue.pr_round} of #{@issue.pr_round_limit}"} />
         <.fact
-          label="Total time"
-          value={
-            Format.duration(
-              Format.seconds(
-                @issue.inserted_at,
-                if(Issue.terminal?(@issue), do: @issue.state_entered_at),
-                @now
-              )
-            )
-          }
+          id="factory-time"
+          label="Factory time"
+          value={Format.duration(Pipeline.time_in(@transitions, Issue.factory_states(), @now))}
+        />
+        <.fact
+          id="waiting-time"
+          label="Waiting on people"
+          value={Format.duration(Pipeline.time_in(@transitions, Issue.waiting_states(), @now))}
         />
         <.fact label="Cost" value={Format.cost(@cost)} />
       </dl>
@@ -240,12 +238,13 @@ defmodule FactoryWeb.IssueLive do
     """
   end
 
+  attr :id, :string, default: nil
   attr :label, :string, required: true
   attr :value, :string, required: true
 
   defp fact(assigns) do
     ~H"""
-    <div class="rounded-xl border border-base-300 bg-base-100 px-4 py-3">
+    <div id={@id} class="rounded-xl border border-base-300 bg-base-100 px-4 py-3">
       <dt class="text-xs text-base-content/60">{@label}</dt>
       <dd class="mt-1 font-semibold tabular-nums">{@value}</dd>
     </div>

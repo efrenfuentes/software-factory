@@ -9,6 +9,8 @@ defmodule Factory.Projects.Project do
 
   @app_types ~w(rails elixir rust go node)
   @models ~w(claude-fable-5-2 claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5)
+  # Codex models, offered only for the Reviewer.
+  @codex_models ~w(gpt-6-astra gpt-6.1-sol gpt-6.1-terra gpt-6-luna)
   @efforts ~w(low medium high xhigh max)
   @plan_approvals ~w(never hard always)
 
@@ -50,6 +52,7 @@ defmodule Factory.Projects.Project do
 
   def app_types, do: @app_types
   def models, do: @models
+  def codex_models, do: @codex_models
   def efforts, do: @efforts
   def plan_approvals, do: @plan_approvals
 
@@ -84,7 +87,8 @@ defmodule Factory.Projects.Project do
     |> validate_number(:max_plan_rounds, greater_than_or_equal_to: 0, less_than_or_equal_to: 10)
     |> validate_number(:max_pr_rounds, greater_than_or_equal_to: 1, less_than_or_equal_to: 10)
     |> validate_number(:max_budget_usd, greater_than: 0)
-    |> validate_each(@model_fields, @models)
+    |> validate_each(@model_fields -- [:reviewer_model], @models)
+    |> validate_inclusion(:reviewer_model, @models ++ @codex_models)
     |> validate_each(@effort_fields, @efforts)
     |> unique_constraint(:repo)
   end

@@ -10,6 +10,7 @@ tardó en cada una, qué modelo se usó y cuánto costó.
 - Elixir, PostgreSQL
 - `gh` autenticado (`gh auth status`) con acceso a los repositorios
 - `claude` (Claude Code) autenticado
+- `codex` (Codex CLI) autenticado, solo si el Reviewer usa un modelo de Codex
 - Las herramientas del stack de cada repositorio (bundler, mix, cargo, go, npm…)
 
 ## Arranque
@@ -21,6 +22,11 @@ mix phx.server   # http://localhost:4000
 
 1. En **Projects → Add project** elige el repositorio, el tipo de aplicación
    (Rails, Elixir, Rust, Go o Node) y el modelo y esfuerzo de cada rol.
+   El Reviewer puede usar un modelo de Claude o de Codex (`codex exec` en modo solo
+   lectura); el resto de roles, solo Claude. Codex informa tokens pero no costo, y el
+   tope de gasto por ejecución no se le aplica.
+   El panel separa el tiempo de la factory (en cola o con un agente trabajando) del
+   tiempo esperando a una persona (respuestas, aprobaciones, merge, reintentos).
 2. Pon la etiqueta `factory:ready` (configurable) a un issue. La factory lo recoge en
    menos de un minuto.
 

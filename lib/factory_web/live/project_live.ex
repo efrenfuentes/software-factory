@@ -76,6 +76,16 @@ defmodule FactoryWeb.ProjectLive do
 
   defp model_options, do: Enum.map(Project.models(), &{Format.model(&1), &1})
 
+  # Only the Reviewer can run on Codex.
+  defp model_options("reviewer") do
+    [
+      {"Claude", model_options()},
+      {"Codex", Enum.map(Project.codex_models(), &{Format.model(&1), &1})}
+    ]
+  end
+
+  defp model_options(_role), do: model_options()
+
   # The stack's default command, shown where the override is left empty.
   defp placeholder(form, key) do
     type = form[:app_type].value
@@ -213,7 +223,7 @@ defmodule FactoryWeb.ProjectLive do
 
           <.section
             title="Models"
-            hint="The Developer's model depends on the difficulty the Planner assigns."
+            hint="The Developer's model depends on the difficulty the Planner assigns. The Reviewer can also run on Codex, which reports tokens but no cost."
           >
             <.role form={@form} label="Planner" prefix="planner" />
             <.role form={@form} label="Reviewer" prefix="reviewer" />
@@ -317,7 +327,12 @@ defmodule FactoryWeb.ProjectLive do
     ~H"""
     <div class="grid grid-cols-[1fr_8rem] gap-x-4 sm:grid-cols-[10rem_1fr_8rem] sm:items-center">
       <span class="col-span-2 text-sm font-medium sm:col-span-1">{@label}</span>
-      <.input field={@model} type="select" options={model_options()} aria-label={"#{@label} model"} />
+      <.input
+        field={@model}
+        type="select"
+        options={model_options(@prefix)}
+        aria-label={"#{@label} model"}
+      />
       <.input
         field={@effort}
         type="select"

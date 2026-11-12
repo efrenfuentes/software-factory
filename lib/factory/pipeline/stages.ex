@@ -85,7 +85,7 @@ defmodule Factory.Pipeline.Stages do
       issue = Pipeline.update_issue(issue, %{plan_round: issue.plan_round + 1})
 
       cond do
-        review["verdict"] == "approve" ->
+        approved?(review) ->
           plan_approved(issue, project)
 
         issue.plan_round >= issue.plan_round_limit ->
@@ -142,7 +142,7 @@ defmodule Factory.Pipeline.Stages do
              prompt: Prompts.pr_reviewer(issue, project.base_branch)
            }) do
       issue = Pipeline.update_issue(issue, %{pr_round: issue.pr_round + 1})
-      approved? = review["verdict"] == "approve"
+      approved? = approved?(review)
       exhausted? = issue.pr_round >= issue.pr_round_limit
 
       GitHub.post(project.repo, issue.pr_number, """
@@ -372,6 +372,9 @@ defmodule Factory.Pipeline.Stages do
         end
     end
   end
+
+  # An approval that still lists blocking problems is not one.
+  defp approved?(review), do: review["verdict"] == "approve" and review["blocking"] in [nil, []]
 
   defp escalate("easy"), do: "medium"
   defp escalate(_), do: "hard"

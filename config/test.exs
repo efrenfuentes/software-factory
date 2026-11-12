@@ -40,6 +40,6 @@ config :factory, Oban, testing: :manual
 
 config :factory,
   github: Factory.Fakes.GitHub,
-  agent_runner: Factory.Fakes.Agent,
+  agent_runners: %{claude: Factory.Fakes.Agent, codex: Factory.Fakes.Agent},
   workspace: Factory.Fakes.Workspace,
   gates: Factory.Fakes.Gates

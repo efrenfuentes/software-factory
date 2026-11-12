@@ -24,7 +24,7 @@ config :factory, Oban,
 # Adapters for the outside world; tests swap these for fakes.
 config :factory,
   github: Factory.GitHub.CLI,
-  agent_runner: Factory.Agents.ClaudeCLI,
+  agent_runners: %{claude: Factory.Agents.ClaudeCLI, codex: Factory.Agents.CodexCLI},
   workspace: Factory.Workspace.Git,
   gates: Factory.Gates.Shell
 

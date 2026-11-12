@@ -41,6 +41,9 @@ defmodule Factory.Pipeline.Issue do
 
   def active_states, do: @active
   def waiting_states, do: @waiting
+
+  @doc "States where time counts as the factory's own: queued for a slot, or an agent working."
+  def factory_states, do: ["queued" | @active]
   def terminal_states, do: @terminal
   def states, do: ["queued"] ++ @active ++ @waiting ++ @terminal
 

@@ -63,6 +63,19 @@ defmodule Factory.Pipeline do
     end
   end
 
+  @doc """
+  Seconds an issue spent in the given states, or nil if it never entered any.
+  A state it is still in runs until `now`.
+  """
+  def time_in(transitions, states, now) do
+    case for t <- transitions,
+             t.state in states,
+             do: DateTime.diff(t.left_at || now, t.entered_at) do
+      [] -> nil
+      seconds -> seconds |> Enum.sum() |> max(0)
+    end
+  end
+
   def list_by_state(states) do
     Repo.all(from i in Issue, where: i.state in ^states, preload: [:project], order_by: i.id)
   end

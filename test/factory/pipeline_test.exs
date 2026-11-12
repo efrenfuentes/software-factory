@@ -160,6 +160,54 @@ defmodule Factory.PipelineTest do
     assert {issue.state, issue.plan_round} == {"needs_human", 4}
   end
 
+  test "time waiting for a person is counted apart from the factory's own time" do
+    at = fn seconds -> DateTime.add(~U[2026-01-01 00:00:00Z], seconds) end
+
+    step = fn state, from, to ->
+      %{state: state, entered_at: at.(from), left_at: to && at.(to)}
+    end
+
+    transitions = [
+      step.("queued", 0, 5),
+      step.("planning", 5, 65),
+      step.("awaiting_answers", 65, 3665),
+      step.("planning", 3665, 3695),
+      step.("needs_human", 3695, nil)
+    ]
+
+    now = at.(4695)
+    assert Pipeline.time_in(transitions, Issue.factory_states(), now) == 95
+    assert Pipeline.time_in(transitions, Issue.waiting_states(), now) == 4600
+    assert Pipeline.time_in(transitions, ["pr_review"], now) == nil
+  end
+
+  test "the reviewer can run on Codex, the other roles only on Claude", %{project: project} do
+    assert %{claude: _, codex: _} = Application.fetch_env!(:factory, :agent_runners)
+    assert Factory.Agents.provider("gpt-6-astra") == :codex
+    assert Factory.Agents.provider("claude-opus-5-5") == :claude
+
+    {:ok, project} =
+      Projects.update_project(project, %{reviewer_model: "gpt-6-astra", reviewer_effort: "high"})
+
+    issue = project |> track() |> drive()
+
+    assert issue.state == "ready_to_merge"
+    assert [%{model: "gpt-6-astra", effort: "high", status: "ok"}] = runs(issue, "plan_review")
+    assert [%{model: "gpt-6-astra"}] = runs(issue, "pr_review")
+
+    assert {:error, changeset} = Projects.update_project(project, %{planner_model: "gpt-6-astra"})
+    assert %{planner_model: ["is invalid"]} = errors_on(changeset)
+  end
+
+  test "an approval that still lists blocking problems counts as changes requested", %{
+    project: project
+  } do
+    Fakes.Agent.script(:reviewer, [Map.put(@approve, "blocking", ["Could not read the diff"])])
+    issue = project |> track() |> drive()
+
+    assert {issue.state, issue.hold_reason} == {"needs_human", "plan_rounds_exhausted"}
+  end
+
   test "stops for a person after three pull request review rounds", %{project: project} do
     Fakes.Agent.script(:reviewer, [@approve, @changes])
     issue = project |> track() |> drive()
