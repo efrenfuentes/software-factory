@@ -20,6 +20,24 @@ if System.get_env("PHX_SERVER") do
   config :factory, FactoryWeb.Endpoint, server: true
 end
 
+# The key that encrypts the project secrets (32 bytes in base64, `openssl rand
+# -base64 32`), and the extra variables every command the factory runs inherits.
+# Tests keep the fixed key of config/test.exs.
+if config_env() != :test do
+  case System.get_env("FACTORY_SECRETS_KEY") do
+    key when key in [nil, ""] -> :ok
+    key -> config :factory, :secrets_key, key
+  end
+
+  passthrough =
+    (System.get_env("FACTORY_ENV_PASSTHROUGH") || "")
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+
+  config :factory, :env_passthrough, passthrough
+end
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||

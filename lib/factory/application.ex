@@ -4,9 +4,12 @@ defmodule Factory.Application do
   @moduledoc false
 
   use Application
+  require Logger
 
   @impl true
   def start(_type, _args) do
+    check_secrets_config()
+
     children = [
       FactoryWeb.Telemetry,
       Factory.Repo,
@@ -21,6 +24,22 @@ defmodule Factory.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: Factory.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # A malformed key stops the start; a missing one only disables the project secrets.
+  defp check_secrets_config do
+    Factory.Secrets.Cipher.check_key!()
+
+    if Factory.Secrets.Cipher.key() == :missing do
+      Logger.warning(
+        "FACTORY_SECRETS_KEY is not set: projects with secrets cannot run. " <>
+          "Generate one with: openssl rand -base64 32"
+      )
+    end
+
+    for name <- Factory.Shell.Env.invalid_passthrough() do
+      Logger.warning("FACTORY_ENV_PASSTHROUGH: ignoring #{inspect(name)}, not a valid name")
+    end
   end
 
   # Tell Phoenix to update the endpoint configuration
