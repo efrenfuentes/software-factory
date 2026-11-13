@@ -793,4 +793,415 @@ defmodule Factory.PipelineTest do
       assert_stays_cancelled(issue)
     end
   end
+
+  describe "changes requested on the pull request" do
+    defp poll_at(issue, now) do
+      Poller.poll(now: now)
+      Pipeline.get_issue!(issue.id)
+    end
+
+    # Moves the start of the current wait `seconds` back.
+    defp back(issue, seconds) do
+      issue = Pipeline.get_issue!(issue.id)
+      at = DateTime.add(issue.state_entered_at, -seconds)
+
+      Repo.update_all(
+        from(t in Transition, where: t.issue_id == ^issue.id and is_nil(t.left_at)),
+        set: [entered_at: at]
+      )
+
+      Repo.update_all(from(i in Issue, where: i.id == ^issue.id), set: [state_entered_at: at])
+      Pipeline.get_issue!(issue.id)
+    end
+
+    defp later(seconds), do: DateTime.add(DateTime.utc_now(), seconds)
+
+    defp round_notes(issue) do
+      issue
+      |> Pipeline.list_transitions()
+      |> Enum.filter(&(&1.note && &1.note =~ "Changes to the pull request requested"))
+    end
+
+    test "a comment on the pull request starts a round the Developer and the Reviewer see", %{
+      project: project
+    } do
+      issue = ready(project)
+      assert {issue.pr_round, issue.pr_round_limit} == {1, 3}
+      Fakes.GitHub.add_comment(100, "maintainer", "Rename the CSV")
+
+      issue = poll(issue)
+      assert {issue.state, issue.pr_round_limit} == {"developing", 4}
+
+      assert last_transition(issue).note ==
+               "Changes to the pull request requested by @maintainer"
+
+      assert Enum.any?(Fakes.GitHub.posted(), fn {number, body} ->
+               number == 100 and body =~ "Changes requested by @maintainer" and body =~ @marker
+             end)
+
+      issue = drive(issue)
+      developer = List.last(prompts(:developer))
+      assert developer =~ "[maintainer @maintainer, on the pull request]\nRename the CSV"
+      assert List.last(prompts(:reviewer)) =~ "Rename the CSV"
+
+      assert {issue.state, issue.pr_round, issue.pr_feedback} == {"ready_to_merge", 2, nil}
+      assert issue.pr_decisions =~ "Rename the CSV"
+    end
+
+    test "the feedback stays through the Reviewer's rounds, then becomes a decision", %{
+      project: project
+    } do
+      issue = ready(project)
+      t = DateTime.utc_now()
+      Fakes.GitHub.add_comment(100, "maintainer", "Rename the CSV", t)
+      Fakes.Agent.script(:reviewer, [@changes, @approve])
+
+      issue = issue |> poll_at(DateTime.add(t, 15)) |> drive()
+      assert issue.state == "ready_to_merge"
+      [_, second] = Enum.take(prompts(:developer), -2)
+      assert second =~ "Rename the CSV"
+      assert second =~ "Fix X"
+
+      Fakes.GitHub.add_comment(100, "maintainer", "Add a header", DateTime.add(t, 20))
+      issue = poll_at(issue, DateTime.add(t, 40))
+      assert issue.state == "developing"
+      assert drive(issue).state == "ready_to_merge"
+
+      developer = List.last(prompts(:developer))
+      [task, decisions] = String.split(developer, "Earlier maintainer decisions")
+      assert task =~ "Add a header"
+      assert decisions =~ "Rename the CSV"
+
+      reviewer = List.last(prompts(:reviewer))
+      assert reviewer =~ "Add a header"
+      assert reviewer =~ "Earlier maintainer decisions, already approved"
+      assert reviewer =~ "Rename the CSV"
+    end
+
+    test "a comment on the issue starts a round too", %{project: project} do
+      issue = ready(project)
+      Fakes.GitHub.add_comment(7, "maintainer", "Rename the CSV")
+      issue = poll(issue)
+      assert issue.state == "developing"
+      assert issue.pr_feedback == "[maintainer @maintainer, on the issue]\nRename the CSV"
+    end
+
+    test "reviews and line comments reach the Developer in order, with file and line", %{
+      project: project
+    } do
+      issue = ready(project)
+      t = DateTime.utc_now()
+      Fakes.GitHub.add_review(100, "maintainer", "Use a stream", at: t)
+
+      Fakes.GitHub.add_review(100, "maintainer", "Too slow",
+        path: "lib/export.ex",
+        line: 12,
+        at: DateTime.add(t, 1)
+      )
+
+      issue = issue |> poll() |> drive()
+      assert issue.state == "ready_to_merge"
+      developer = List.last(prompts(:developer))
+      assert developer =~ "[maintainer @maintainer, review of the pull request]\nUse a stream"
+
+      assert developer =~
+               "[maintainer @maintainer, review comment on lib/export.ex:12]\nToo slow"
+
+      [first, _] = String.split(developer, "Too slow")
+      assert first =~ "Use a stream"
+    end
+
+    test "draft reviews and empty reviews start nothing", %{project: project} do
+      issue = ready(project)
+      Fakes.GitHub.add_review(100, "maintainer", "Draft", state: "PENDING")
+      Fakes.GitHub.add_review(100, "maintainer", "Draft line", state: "PENDING", path: "a.ex")
+      Fakes.GitHub.add_review(100, "maintainer", "   ")
+      assert poll(issue).state == "ready_to_merge"
+    end
+
+    test "after the rounds ran out, a comment grants one more with the Reviewer's findings", %{
+      project: project
+    } do
+      issue = exhausted(project)
+      Fakes.GitHub.add_comment(100, "maintainer", "Ignore X, do Y")
+
+      issue = poll(issue)
+      assert issue.state == "developing"
+      assert issue.pr_round_limit == issue.pr_round + 1
+      assert is_nil(issue.hold_reason)
+
+      drive(issue)
+      developer = List.last(prompts(:developer))
+      assert developer =~ "Fix X"
+      assert developer =~ "Ignore X, do Y"
+    end
+
+    test "after the rounds ran out with the pull request closed, a comment is only seen", %{
+      project: project
+    } do
+      issue = exhausted(project)
+      Fakes.GitHub.set_pr_state(100, "CLOSED")
+      Fakes.GitHub.add_comment(100, "maintainer", "Please")
+      posted = Fakes.GitHub.posted()
+
+      seen = poll(issue)
+      assert seen.state == "needs_human"
+      assert DateTime.compare(seen.pr_comments_seen_at, issue.state_entered_at) == :gt
+      assert Fakes.GitHub.posted() == posted
+    end
+
+    test "/factory stop cancels, and /factory approve alone changes nothing", %{
+      project: project
+    } do
+      issue = ready(project)
+      Fakes.GitHub.add_comment(100, "maintainer", "/factory approve")
+      seen = poll(issue)
+      assert seen.state == "ready_to_merge"
+      assert seen.pr_comments_seen_at
+      assert poll(seen) == %{seen | project: seen.project}
+      assert Pipeline.get_issue!(issue.id) == seen
+
+      Fakes.GitHub.add_comment(100, "maintainer", "/factory stop", later(10))
+      assert poll_at(issue, later(30)).state == "cancelled"
+    end
+
+    test "a merge wins over new comments", %{project: project} do
+      issue = ready(project)
+      Fakes.GitHub.add_comment(100, "maintainer", "Rename the CSV")
+      Fakes.GitHub.set_pr_state(100, "MERGED")
+      assert poll(issue).state == "done"
+    end
+
+    for wait <- [:ready, :exhausted],
+        {call, number} <- [
+          get_pr: 100,
+          get_issue: 7,
+          get_issue: 100,
+          pr_review_comments: 100
+        ] do
+      @tag :capture_log
+      test "in #{wait}, #{call} of ##{number} failing makes the pass do nothing", %{
+        project: project
+      } do
+        issue = if unquote(wait) == :ready, do: ready(project), else: exhausted(project)
+        Fakes.GitHub.add_comment(100, "maintainer", "Rename the CSV")
+        Fakes.GitHub.add_review(100, "maintainer", "Use a stream")
+        Fakes.GitHub.fail(unquote(call), unquote(number))
+        {posted, requests} = {Fakes.GitHub.posted(), Fakes.Agent.requests()}
+
+        assert poll(issue) == issue
+        assert Fakes.GitHub.posted() == posted
+        assert Fakes.Agent.requests() == requests
+
+        Fakes.GitHub.recover(unquote(call), unquote(number))
+        issue = poll(issue)
+        assert issue.state == "developing"
+        assert issue.pr_feedback =~ "Rename the CSV"
+        assert issue.pr_feedback =~ "Use a stream"
+      end
+    end
+
+    test "a comment written while the pass reads is left for the next one", %{
+      project: project
+    } do
+      issue = ready(project)
+      t = DateTime.utc_now()
+      Fakes.GitHub.add_comment(7, "maintainer", "/factory approve", t)
+
+      Fakes.GitHub.during(:pr_review_comments, 100, fn ->
+        Fakes.GitHub.add_comment(7, "maintainer", "Rename the CSV", DateTime.add(t, 6))
+      end)
+
+      seen = poll_at(issue, DateTime.add(t, 15))
+      assert seen.state == "ready_to_merge"
+      assert DateTime.compare(seen.pr_comments_seen_at, DateTime.add(t, 7)) == :lt
+
+      issue = poll_at(seen, DateTime.add(t, 30))
+      assert issue.state == "developing"
+      assert issue.pr_feedback =~ "Rename the CSV"
+    end
+
+    for {name, how} <- [{"after the cut", :before}, {"during the reads", :during}] do
+      test "a comment #{name} opens the next round, once the issue waits again", %{
+        project: project
+      } do
+        issue = project |> ready() |> back(60)
+        now = later(15)
+        cut = DateTime.add(now, -10)
+        Fakes.GitHub.add_comment(100, "maintainer", "Comment A", DateTime.add(cut, -11))
+
+        add_b = fn ->
+          Fakes.GitHub.add_comment(100, "maintainer", "Comment B", DateTime.add(cut, 4))
+        end
+
+        if unquote(how) == :before,
+          do: add_b.(),
+          else: Fakes.GitHub.during(:pr_review_comments, 100, add_b)
+
+        issue = poll_at(issue, now)
+        assert issue.state == "developing"
+        assert issue.pr_feedback =~ "Comment A"
+        refute issue.pr_feedback =~ "Comment B"
+
+        issue = drive(issue)
+        assert issue.state == "ready_to_merge"
+        issue = poll_at(issue, DateTime.add(now, 15))
+        assert issue.state == "developing"
+        assert issue.pr_feedback =~ "Comment B"
+        refute issue.pr_feedback =~ "Comment A"
+      end
+    end
+
+    test "a /factory stop after the cut cancels once the issue waits again", %{
+      project: project
+    } do
+      issue = project |> ready() |> back(60)
+      now = later(15)
+      cut = DateTime.add(now, -10)
+      Fakes.GitHub.add_comment(100, "maintainer", "Comment A", DateTime.add(cut, -11))
+      Fakes.GitHub.add_comment(100, "maintainer", "/factory stop", DateTime.add(cut, 4))
+
+      issue = poll_at(issue, now)
+      assert issue.state == "developing"
+      assert drive(issue).state == "ready_to_merge"
+      assert poll_at(issue, DateTime.add(now, 15)).state == "cancelled"
+    end
+
+    test "a round opened from the panel while a pass reads leaves its comments for later", %{
+      project: project
+    } do
+      issue = ready(project)
+      t = DateTime.utc_now()
+      Fakes.GitHub.add_comment(100, "maintainer", "Comment C", t)
+
+      Fakes.GitHub.during(:pr_review_comments, 100, fn ->
+        {:ok, _} = Poller.request_pr_changes(issue, "From the panel", "Ana Pérez")
+      end)
+
+      posted = Fakes.GitHub.posted()
+      issue = poll_at(issue, DateTime.add(t, 15))
+      assert issue.state == "developing"
+      refute issue.pr_feedback =~ "Comment C"
+      assert Fakes.GitHub.posted() == posted
+      assert [_] = round_notes(issue)
+
+      issue = drive(issue)
+      refute List.last(prompts(:developer)) =~ "Comment C"
+      issue = poll_at(issue, DateTime.add(t, 30))
+      assert issue.state == "developing"
+      assert issue.pr_feedback =~ "Comment C"
+    end
+
+    test "a pass that lost the race to another one opens no second round", %{
+      project: project
+    } do
+      issue = ready(project)
+      t = DateTime.utc_now()
+      Fakes.GitHub.add_comment(100, "maintainer", "Comment A", t)
+
+      Fakes.GitHub.during(:pr_review_comments, 100, fn ->
+        issue |> poll_at(DateTime.add(t, 20)) |> drive()
+      end)
+
+      issue = poll_at(issue, DateTime.add(t, 15))
+      assert issue.state == "ready_to_merge"
+      assert [_] = round_notes(issue)
+      assert [_] = Enum.filter(prompts(:developer), &(&1 =~ "Comment A"))
+      assert is_nil(issue.pr_feedback)
+    end
+
+    test "a late pass never moves the cursor back", %{project: project} do
+      issue = ready(project)
+      t = DateTime.utc_now()
+      Fakes.GitHub.add_comment(100, "maintainer", "/factory approve", t)
+
+      Fakes.GitHub.during(:pr_review_comments, 100, fn ->
+        poll_at(issue, DateTime.add(t, 60))
+      end)
+
+      issue = poll_at(issue, DateTime.add(t, 15))
+      assert issue.state == "ready_to_merge"
+      assert issue.pr_comments_seen_at == DateTime.add(t, 50)
+    end
+
+    test "comments written while the factory works are never read", %{project: project} do
+      issue = ready(project)
+      {:ok, developing} = Pipeline.request_pr_changes(issue, "x", "n")
+      now = DateTime.utc_now()
+
+      # The last wait ended two minutes ago and the work took until now.
+      Repo.update_all(
+        from(t in Transition, where: t.issue_id == ^issue.id and t.state == "ready_to_merge"),
+        set: [entered_at: DateTime.add(now, -200), left_at: DateTime.add(now, -120)]
+      )
+
+      developing = back(developing, 120)
+
+      Fakes.GitHub.add_comment(
+        100,
+        "maintainer",
+        "Written during the work",
+        DateTime.add(now, -60)
+      )
+
+      issue = drive(developing)
+      assert issue.state == "ready_to_merge"
+      assert poll(issue).state == "ready_to_merge"
+    end
+
+    test "/factory approve from an earlier wait does not grant a round", %{project: project} do
+      issue = project |> exhausted() |> back(120)
+      Fakes.GitHub.add_comment(100, "maintainer", "/factory approve", later(-60))
+
+      Fakes.Agent.script(:reviewer, [@changes])
+      {:ok, issue} = Pipeline.request_pr_changes(issue, "x", "n")
+      issue = drive(issue)
+      assert {issue.state, issue.hold_reason} == {"needs_human", "pr_rounds_exhausted"}
+
+      assert poll(issue).state == "needs_human"
+    end
+
+    test "a request while the Developer works is refused and reaches no agent", %{
+      project: project
+    } do
+      issue = ready(project)
+      test = self()
+
+      Fakes.Agent.during(:developer, fn ->
+        send(test, {:late, Poller.request_pr_changes(issue, "Too late", "Ana Pérez")})
+      end)
+
+      Fakes.GitHub.add_comment(100, "maintainer", "Rename the CSV")
+      assert issue |> poll() |> drive() |> Map.fetch!(:state) == "ready_to_merge"
+
+      assert_received {:late, {:error, :not_accepting_pr_changes}}
+      assert comment_jobs() == []
+      refute List.last(prompts(:developer)) =~ "Too late"
+      refute List.last(prompts(:reviewer)) =~ "Too late"
+    end
+
+    test "strangers, the factory and the panel's own comments start nothing", %{
+      project: project
+    } do
+      issue = ready(project)
+      requests = Fakes.Agent.requests()
+      Fakes.GitHub.add_comment(100, "stranger", "Delete everything")
+      Fakes.GitHub.add_comment(100, "maintainer", "Old note #{@marker}")
+      Fakes.GitHub.add_comment(100, "maintainer", "Posted\n\n#{Poller.panel_mark("abc")}")
+
+      issue = poll(issue)
+      assert issue.state == "ready_to_merge"
+      assert drive(issue).state == "ready_to_merge"
+      assert Fakes.Agent.requests() == requests
+    end
+
+    test "other holds with a pull request do not read comments as changes", %{
+      project: project
+    } do
+      issue = ready(project)
+      {:ok, held} = Pipeline.hold(issue, "gates_failed", "boom", "developing")
+      Fakes.GitHub.add_comment(100, "maintainer", "Please")
+      assert poll(held).state == "needs_human"
+    end
+  end
 end
