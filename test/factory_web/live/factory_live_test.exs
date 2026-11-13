@@ -1,5 +1,6 @@
 defmodule FactoryWeb.FactoryLiveTest do
   use FactoryWeb.ConnCase, async: false
+  use Oban.Testing, repo: Factory.Repo
   import Phoenix.LiveViewTest
 
   alias Factory.Fakes
@@ -156,6 +157,8 @@ defmodule FactoryWeb.FactoryLiveTest do
     issue = run_to_rest(issue)
     assert issue.state == "awaiting_plan_approval"
 
+    refute has_element?(view, "#pr-feedback-form")
+
     # Open on the spec while it waits for a decision, rendered and sanitized.
     assert has_element?(view, "#plan-content strong", "CSV")
     refute has_element?(view, "#plan-content script")
@@ -185,5 +188,108 @@ defmodule FactoryWeb.FactoryLiveTest do
     refute has_element?(view, "#plan-content")
     view |> element("#plan-toggle") |> render_click()
     assert has_element?(view, "#plan-content")
+  end
+
+  describe "changes to the pull request" do
+    defp ready_issue do
+      Fakes.GitHub.put_issue(7, title: "Add export")
+
+      {:ok, issue} =
+        Pipeline.track_issue(project(), %{number: 7, title: "Add export", body: "", url: "u"})
+
+      issue = run_to_rest(issue)
+      assert issue.state == "ready_to_merge"
+      issue
+    end
+
+    defp panel_posts, do: Enum.filter(Fakes.GitHub.posted(), &match?({100, "Rename" <> _}, &1))
+
+    defp submit(view, text),
+      do: view |> form("#pr-feedback-form", pr_changes: %{feedback: text}) |> render_submit()
+
+    test "a person asks for changes and their comment is posted on the pull request", %{
+      conn: conn
+    } do
+      issue = ready_issue()
+      {:ok, view, _html} = live(conn, ~p"/issues/#{issue.id}")
+      assert has_element?(view, "#pr-feedback-form")
+
+      assert submit(view, "  ") =~ "Write what should change"
+      assert Pipeline.get_issue!(issue.id).state == "ready_to_merge"
+
+      submit(view, "Rename the CSV")
+      assert Pipeline.get_issue!(issue.id).state == "developing"
+
+      assert has_element?(
+               view,
+               "#transitions",
+               "Changes to the pull request requested by Ana Pérez"
+             )
+
+      refute has_element?(view, "#pr-feedback-form")
+      assert panel_posts() == []
+
+      assert %{success: 1} = Oban.drain_queue(queue: :github)
+      assert [{100, body}] = panel_posts()
+
+      assert String.starts_with?(
+               body,
+               "Rename the CSV\n\n_Sent from Software Factory by Ana Pérez._"
+             )
+
+      assert Factory.Pipeline.Poller.panel_comment?(%{body: body})
+    end
+
+    test "the comment is posted once GitHub answers again", %{conn: conn} do
+      issue = ready_issue()
+      Fakes.GitHub.fail(:comment, 100)
+      {:ok, view, _html} = live(conn, ~p"/issues/#{issue.id}")
+      submit(view, "Rename the CSV")
+
+      assert Pipeline.get_issue!(issue.id).state == "developing"
+      Oban.drain_queue(queue: :github)
+      assert panel_posts() == []
+
+      Fakes.GitHub.recover(:comment, 100)
+      assert %{success: 1} = Oban.drain_queue(queue: :github, with_scheduled: true)
+      assert [_] = panel_posts()
+    end
+
+    test "nothing is sent when the pull request cannot be read or is not open", %{conn: conn} do
+      issue = ready_issue()
+      {:ok, view, _html} = live(conn, ~p"/issues/#{issue.id}")
+
+      Fakes.GitHub.fail(:get_pr, 100)
+      assert submit(view, "Rename the CSV") =~ "Could not read the pull request"
+      Fakes.GitHub.recover(:get_pr, 100)
+
+      Fakes.GitHub.set_pr_state(100, "MERGED")
+      assert submit(view, "Rename the CSV") =~ "no longer open"
+
+      assert Pipeline.get_issue!(issue.id).state == "ready_to_merge"
+      assert all_enqueued(worker: Factory.Workers.CommentWorker) == []
+      Oban.drain_queue(queue: :github)
+      assert panel_posts() == []
+    end
+
+    test "a round opened meanwhile refuses the request", %{conn: conn} do
+      issue = ready_issue()
+      {:ok, view, _html} = live(conn, ~p"/issues/#{issue.id}")
+      assert has_element?(view, "#pr-feedback-form")
+      {:ok, _} = Pipeline.request_pr_changes(issue, "Other", "Other round")
+
+      assert render_hook(view, "request_pr_changes", %{"pr_changes" => %{"feedback" => "x"}}) =~
+               "not waiting for changes"
+
+      assert all_enqueued(worker: Factory.Workers.CommentWorker) == []
+    end
+
+    test "is not offered while held for another reason", %{conn: conn} do
+      issue = ready_issue()
+      {:ok, held} = Pipeline.hold(issue, "gates_failed", "boom", "developing")
+      {:ok, view, _html} = live(conn, ~p"/issues/#{held.id}")
+      assert has_element?(view, "#hold-notice")
+      refute has_element?(view, "#pr-feedback-form")
+    end
   end
 end

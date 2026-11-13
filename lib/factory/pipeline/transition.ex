@@ -5,6 +5,8 @@ defmodule Factory.Pipeline.Transition do
   schema "transitions" do
     field :state, :string
     field :note, :string
+    # Why the issue waited, for `needs_human` periods.
+    field :hold_reason, :string
     field :entered_at, :utc_datetime_usec
     field :left_at, :utc_datetime_usec
 

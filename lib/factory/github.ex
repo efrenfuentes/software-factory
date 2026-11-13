@@ -8,6 +8,17 @@ defmodule Factory.GitHub do
 
   @type issue :: %{number: integer(), title: String.t(), body: String.t(), url: String.t()}
   @type comment :: %{author: String.t(), body: String.t(), created_at: DateTime.t()}
+  @typedoc """
+  What a submitted pull request review says: its own text (`path` nil) or a
+  comment on a line of the diff.
+  """
+  @type review_comment :: %{
+          author: String.t(),
+          body: String.t(),
+          created_at: DateTime.t(),
+          path: String.t() | nil,
+          line: integer() | nil
+        }
 
   @callback list_issues(repo :: String.t(), label :: String.t()) ::
               {:ok, [issue]} | {:error, term()}
@@ -21,6 +32,8 @@ defmodule Factory.GitHub do
               {:ok, %{number: integer(), url: String.t()}} | {:error, term()}
   @callback get_pr(repo :: String.t(), number :: integer()) ::
               {:ok, %{state: String.t()}} | {:error, term()}
+  @callback pr_review_comments(repo :: String.t(), number :: integer()) ::
+              {:ok, [review_comment]} | {:error, term()}
   @callback set_label(
               repo :: String.t(),
               number :: integer(),

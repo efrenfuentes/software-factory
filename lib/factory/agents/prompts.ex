@@ -132,18 +132,29 @@ defmodule Factory.Agents.Prompts do
     dir = Workspace.plan_dir(issue)
 
     task =
-      case context do
-        %{review: %{} = review} ->
+      cond do
+        context[:feedback] ->
+          """
+          A maintainer asked for changes to the pull request. This is a decision, and the main
+          task of this round: implement it even where it goes beyond the plan.
+
+          <comments>
+          #{context.feedback}
+          </comments>
+          #{also_review(context[:review])}
+          """
+
+        match?(%{review: %{}}, context) ->
           """
           The Reviewer requested changes on the pull request. Resolve every blocking item
           below; apply the minor ones when they are cheap and clearly right.
 
           <review>
-          #{findings(review)}
+          #{findings(context.review)}
           </review>
           """
 
-        _ ->
+        true ->
           """
           Implement every unchecked task in `#{dir}/tasks.md`, in order, following
           `#{dir}/plan.md` and satisfying the acceptance criteria in `#{dir}/spec.md`.
@@ -155,10 +166,10 @@ defmodule Factory.Agents.Prompts do
     You are the Developer for issue ##{issue.number}: #{issue.title}
 
     #{task}
-    #{gate_failure(context[:gate_failure])}
+    #{decisions(context[:decisions])}#{gate_failure(context[:gate_failure])}
     Follow the repository's conventions (read its CLAUDE.md, AGENTS.md or README if present).
     Write or update tests for what you change and run them. Keep the change limited to what
-    the plan asks for. Commit your work with clear messages; do not push.
+    #{if context[:feedback] || context[:decisions], do: "the plan and the maintainer's decisions ask", else: "the plan asks"} for. Commit your work with clear messages; do not push.
 
     The factory runs these checks after you finish, and they must pass:
     #{context.checks}
@@ -184,7 +195,7 @@ defmodule Factory.Agents.Prompts do
     tests, or work outside the agreed scope. Style preferences and optional improvements go
     in "minor" and do not block approval. The tests and lint already pass; do not ask to
     run them.
-
+    #{reviewer_feedback(issue.pr_feedback)}#{reviewer_decisions(issue.pr_decisions)}
     Each blocking item must name the file and line, what is wrong, and what would resolve it.
     """
   end
@@ -213,6 +224,64 @@ defmodule Factory.Agents.Prompts do
 
     <comments>
     #{if comments == [], do: "(none)", else: Enum.join(comments, "\n\n---\n\n")}
+    </comments>
+    """
+  end
+
+  defp also_review(nil), do: ""
+
+  defp also_review(review) do
+    """
+
+    The Reviewer also requested changes. Resolve its blocking items too; if they conflict,
+    the maintainer's feedback wins.
+
+    <review>
+    #{findings(review)}
+    </review>
+    """
+  end
+
+  defp decisions(nil), do: ""
+
+  defp decisions(text) do
+    """
+
+    Earlier maintainer decisions on this pull request, already implemented and part of the
+    agreed scope: keep them.
+
+    <comments>
+    #{text}
+    </comments>
+    """
+  end
+
+  defp reviewer_feedback(nil), do: ""
+
+  defp reviewer_feedback(text) do
+    """
+
+    A maintainer asked for these changes to the pull request:
+
+    <comments>
+    #{text}
+    </comments>
+
+    Check that every request in it is implemented; anything missing is blocking. It is part
+    of the agreed scope: never call it out of scope.
+    """
+  end
+
+  defp reviewer_decisions(nil), do: ""
+
+  defp reviewer_decisions(text) do
+    """
+
+    Earlier maintainer decisions, already approved: part of the agreed scope; never call
+    work that implements them out of scope.
+
+    <comments>
+    #{text}
     </comments>
     """
   end

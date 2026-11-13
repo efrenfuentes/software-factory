@@ -2,7 +2,7 @@ defmodule Factory.Pipeline do
   @moduledoc """
   State and history of the issues in the factory.
 
-  Every state change goes through `transition/4`, which keeps the `transitions`
+  Every state change goes through `transition/5`, which keeps the `transitions`
   history (used for the time spent per stage), notifies the UI and, when the new
   state is one an agent works on, enqueues the job that runs it.
   """
@@ -142,39 +142,208 @@ defmodule Factory.Pipeline do
 
   @doc """
   Moves an issue to `state`, applying `attrs` to it in the same transaction.
+
+  The issue's row is locked first, and every decision is made on it rather than
+  on the `issue` given: an issue that is already `done` or `cancelled` is never
+  moved again (a stage finishing late cannot undo a cancellation), and the job
+  of the new state is enqueued in the same transaction.
+
+  Options:
+    * `:unchanged_since` — an issue read earlier; if its wait (`state_entered_at`)
+      or its `pr_comments_seen_at` changed since, nothing is written and
+      `{:error, :stale}` is returned.
+    * `:seen_until` — moves `pr_comments_seen_at` forward to this time (never back).
   """
-  def transition(%Issue{} = issue, state, attrs \\ %{}, note \\ nil) do
-    now = DateTime.utc_now()
+  def transition(%Issue{} = issue, state, attrs \\ %{}, note \\ nil, opts \\ []) do
+    Repo.transaction(fn ->
+      row = lock!(issue.id)
+      {row, write_transition(row, state, attrs, note, opts)}
+    end)
+    |> after_commit(issue)
+  end
 
-    attrs =
-      attrs
-      |> Map.new()
-      |> Map.merge(%{state: state, state_entered_at: now})
-      |> then(fn attrs ->
-        # Comments older than the moment we start waiting were already seen by an agent.
-        if state in Issue.waiting_states(),
-          do: Map.put_new(attrs, :comments_seen_at, now),
-          else: attrs
-      end)
+  defp after_commit({:ok, {row, updated}}, issue) do
+    updated = %{updated | project: issue.project}
+    Factory.Pipeline.GitHubStatus.sync(row, updated)
+    broadcast(updated.id)
+    {:ok, updated}
+  end
 
-    before = issue
+  defp after_commit({:error, reason}, _issue), do: {:error, reason}
 
-    {:ok, issue} =
-      Repo.transaction(fn ->
-        from(t in Transition, where: t.issue_id == ^issue.id and is_nil(t.left_at))
+  # Every transaction that writes transitions locks the issue's row first, so
+  # they are serialized in one order and never deadlock.
+  defp lock!(id), do: Repo.one!(from i in Issue, where: i.id == ^id, lock: "FOR UPDATE")
+
+  defp write_transition(row, state, attrs, note, opts) do
+    cond do
+      Issue.terminal?(row) ->
+        row
+
+      stale?(row, opts[:unchanged_since]) ->
+        Repo.rollback(:stale)
+
+      true ->
+        now = DateTime.utc_now()
+
+        attrs =
+          attrs
+          |> Map.new()
+          |> Map.merge(%{state: state, state_entered_at: now})
+          |> then(fn attrs ->
+            # Comments older than the moment we start waiting were already seen by an agent.
+            if state in Issue.waiting_states(),
+              do: Map.put_new(attrs, :comments_seen_at, now),
+              else: attrs
+          end)
+          |> then(fn attrs ->
+            case opts[:seen_until] do
+              nil -> attrs
+              cut -> Map.put(attrs, :pr_comments_seen_at, latest(row.pr_comments_seen_at, cut))
+            end
+          end)
+
+        from(t in Transition, where: t.issue_id == ^row.id and is_nil(t.left_at))
         |> Repo.update_all(set: [left_at: now])
 
-        Repo.insert!(%Transition{issue_id: issue.id, state: state, note: note, entered_at: now})
-        issue |> Ecto.Changeset.change(attrs) |> Repo.update!()
+        Repo.insert!(%Transition{
+          issue_id: row.id,
+          state: state,
+          note: note,
+          entered_at: now,
+          hold_reason: if(state == "needs_human", do: attrs[:hold_reason])
+        })
+
+        updated = row |> Ecto.Changeset.change(attrs) |> Repo.update!()
+
+        if state in Issue.active_states() do
+          %{issue_id: row.id, state: state} |> Factory.Workers.StageWorker.new() |> Oban.insert!()
+        end
+
+        updated
+    end
+  end
+
+  # Whether the issue moved on since `snapshot` was read.
+  defp stale?(_row, nil), do: false
+
+  defp stale?(row, %Issue{} = snapshot) do
+    not (same_time?(row.state_entered_at, snapshot.state_entered_at) and
+           same_time?(row.pr_comments_seen_at, snapshot.pr_comments_seen_at))
+  end
+
+  defp same_time?(nil, nil), do: true
+  defp same_time?(nil, _), do: false
+  defp same_time?(_, nil), do: false
+  defp same_time?(a, b), do: DateTime.compare(a, b) == :eq
+
+  defp latest(nil, at), do: at
+  defp latest(current, at), do: if(DateTime.compare(at, current) == :gt, do: at, else: current)
+
+  @doc """
+  Records that the comments on the issue and its pull request up to `cut` were
+  handled, if the issue is still in the wait `issue` was read in. The mark never
+  moves back.
+  """
+  def mark_pr_comments_seen(%Issue{} = issue, cut) do
+    Repo.transaction(fn ->
+      row = lock!(issue.id)
+      if stale?(row, issue), do: Repo.rollback(:stale)
+
+      row
+      |> Ecto.Changeset.change(pr_comments_seen_at: latest(row.pr_comments_seen_at, cut))
+      |> Repo.update!()
+    end)
+    |> case do
+      {:ok, updated} ->
+        broadcast(updated.id)
+        {:ok, %{updated | project: issue.project}}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Whether the issue is done or cancelled. It waits for a cancellation that is
+  being written, so an effect checked with it never runs after one.
+  """
+  def stopped?(%Issue{id: id}) do
+    {:ok, state} =
+      Repo.transaction(fn ->
+        Repo.one!(from i in Issue, where: i.id == ^id, select: i.state, lock: "FOR SHARE")
       end)
 
-    if state in Issue.active_states() do
-      %{issue_id: issue.id, state: state} |> Factory.Workers.StageWorker.new() |> Oban.insert!()
-    end
+    state in Issue.terminal_states()
+  end
 
-    Factory.Pipeline.GitHubStatus.sync(before, issue)
-    broadcast(issue.id)
-    {:ok, issue}
+  @doc """
+  The periods the issue spent waiting with its pull request open for changes:
+  `ready_to_merge`, and `needs_human` after the review rounds ran out.
+  `left_at` is nil for the current one.
+  """
+  def pr_waiting_periods(%Issue{id: id}) do
+    Repo.all(
+      from t in Transition,
+        where: t.issue_id == ^id,
+        where:
+          t.state == "ready_to_merge" or
+            (t.state == "needs_human" and t.hold_reason == "pr_rounds_exhausted"),
+        order_by: [asc: t.entered_at, asc: t.id],
+        select: {t.entered_at, t.left_at}
+    )
+  end
+
+  @doc """
+  A person asks for changes to the pull request: the issue goes back to
+  `developing` with their feedback, as one atomic decision on the stored issue.
+
+  It is refused with `{:error, :not_accepting_pr_changes}` unless the issue is
+  waiting in one of the states of `Issue.accepts_pr_changes?/1` — so of two
+  requests at once only the first wins, and nothing is ever added to a round
+  that is already open. Rounds asked by a person do not use up automatic ones.
+
+  Options, besides those of `transition/5`:
+    * `:before_commit` — called with the locked issue before anything is
+      written; it may only read. `{:ok, _}` lets the request go on; `{:error,
+      reason}` rolls it back.
+    * `:jobs` — Oban job changesets inserted in the same transaction.
+  """
+  def request_pr_changes(%Issue{} = issue, feedback, note, opts \\ []) do
+    Repo.transaction(fn ->
+      row = lock!(issue.id)
+      if not Issue.accepts_pr_changes?(row), do: Repo.rollback(:not_accepting_pr_changes)
+
+      # `{:ok, _}` is the only answer that lets the request go on.
+      case (opts[:before_commit] || fn _ -> {:ok, row} end).(row) do
+        {:ok, _} -> :ok
+        {:error, reason} -> Repo.rollback(reason)
+      end
+
+      limit =
+        if row.state == "ready_to_merge", do: row.pr_round_limit + 1, else: row.pr_round + 1
+
+      attrs = %{
+        pr_round_limit: limit,
+        pr_feedback: join_feedback([row.pr_feedback, feedback]),
+        hold_reason: nil,
+        hold_detail: nil,
+        resume_state: nil
+      }
+
+      updated = write_transition(row, "developing", attrs, note, opts)
+      for job <- opts[:jobs] || [], do: Oban.insert!(job)
+      {row, updated}
+    end)
+    |> after_commit(issue)
+  end
+
+  @doc "Joins pieces of feedback, oldest first, leaving out the missing ones."
+  def join_feedback(pieces) do
+    case Enum.reject(pieces, &(&1 in [nil, ""])) do
+      [] -> nil
+      pieces -> Enum.join(pieces, "\n\n---\n\n")
+    end
   end
 
   def update_issue(%Issue{} = issue, attrs) do
@@ -185,17 +354,34 @@ defmodule Factory.Pipeline do
 
   ## Stage runs
 
-  def start_run(%Issue{} = issue, attrs) do
-    run =
+  @doc """
+  Records that an agent or a check starts, unless the issue was stopped.
+
+  The issue's row is read `FOR SHARE`, so this and a cancellation are
+  serialized: if the cancellation commits first, `{:error, :stopped}` and
+  nothing starts; otherwise the run counts as started and the cancellation
+  waits for it to be recorded. Call the agent or check right after.
+  """
+  def authorize_run(%Issue{id: id}, attrs) do
+    Repo.transaction(fn ->
+      state = Repo.one!(from i in Issue, where: i.id == ^id, select: i.state, lock: "FOR SHARE")
+      if state in Issue.terminal_states(), do: Repo.rollback(:stopped)
+
       Repo.insert!(
         struct!(
           StageRun,
-          Map.merge(Map.new(attrs), %{issue_id: issue.id, started_at: DateTime.utc_now()})
+          Map.merge(Map.new(attrs), %{issue_id: id, started_at: DateTime.utc_now()})
         )
       )
+    end)
+    |> case do
+      {:ok, run} ->
+        broadcast(id)
+        {:ok, run}
 
-    broadcast(issue.id)
-    run
+      error ->
+        error
+    end
   end
 
   def finish_run(%StageRun{} = run, status, attrs \\ %{}) do
@@ -219,13 +405,13 @@ defmodule Factory.Pipeline do
   A person lets the issue continue: approves the plan, grants one more review
   round after the limit was reached, or retries after a failure.
   """
-  def approve(issue, actor \\ "a person")
+  def approve(issue, actor \\ "a person", opts \\ [])
 
-  def approve(%Issue{state: "awaiting_plan_approval"} = issue, actor) do
-    transition(issue, "developing", %{}, "Plan approved by #{actor}")
+  def approve(%Issue{state: "awaiting_plan_approval"} = issue, actor, opts) do
+    transition(issue, "developing", %{}, "Plan approved by #{actor}", opts)
   end
 
-  def approve(%Issue{state: state, resume_state: resume} = issue, actor)
+  def approve(%Issue{state: state, resume_state: resume} = issue, actor, opts)
       when state in ["needs_human", "failed"] and is_binary(resume) do
     attrs =
       case issue.hold_reason do
@@ -235,13 +421,14 @@ defmodule Factory.Pipeline do
       end
 
     attrs = Map.merge(attrs, %{hold_reason: nil, hold_detail: nil, resume_state: nil})
-    transition(issue, resume, attrs, "Continued by #{actor}")
+    transition(issue, resume, attrs, "Continued by #{actor}", opts)
   end
 
-  def approve(%Issue{}, _actor), do: {:error, :not_waiting_for_approval}
+  def approve(%Issue{}, _actor, _opts), do: {:error, :not_waiting_for_approval}
 
-  def cancel(%Issue{} = issue, note \\ "Stopped by a person") do
-    if Issue.terminal?(issue), do: {:ok, issue}, else: transition(issue, "cancelled", %{}, note)
+  @doc "Stops the issue for good. Takes the options of `transition/5`."
+  def cancel(%Issue{} = issue, note \\ "Stopped by a person", opts \\ []) do
+    transition(issue, "cancelled", %{}, note, opts)
   end
 
   @doc "Parks the issue until a person decides. `resume` is the state `approve/1` goes back to."

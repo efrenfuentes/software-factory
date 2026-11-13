@@ -11,10 +11,11 @@ config :factory,
   ecto_repos: [Factory.Repo],
   generators: [timestamp_type: :utc_datetime]
 
-# Background jobs. `agents` bounds how many issues are worked on at once.
+# Background jobs. `agents` bounds how many issues are worked on at once; `github`
+# posts the comments written in the panel.
 config :factory, Oban,
   repo: Factory.Repo,
-  queues: [poll: 1, agents: 2],
+  queues: [poll: 1, agents: 2, github: 1],
   plugins: [
     {Oban.Plugins.Pruner, max_age: 60 * 60 * 24 * 7},
     {Oban.Plugins.Lifeline, rescue_after: :timer.minutes(90)},

@@ -16,13 +16,43 @@ defmodule Factory.Fakes.State do
       listed: [],
       prs: %{},
       code_changed?: true,
-      plan: []
+      plan: [],
+      # Raw REST payloads of pull request reviews: %{number => %{reviews: [], comments: []}}.
+      reviews: %{},
+      # Calls that fail until recovered: %{{call, number} => :before | :after}.
+      failures: %{},
+      # Functions run once when a call starts: %{{call, number} => fun}.
+      hooks: %{},
+      agent_hooks: %{},
+      gate_hooks: %{},
+      gate_calls: 0,
+      commits: [],
+      pushes: []
     }
   end
 
   def get(key), do: Agent.get(__MODULE__, &Map.fetch!(&1, key))
   def put(key, value), do: Agent.update(__MODULE__, &Map.put(&1, key, value))
   def update(key, fun), do: Agent.update(__MODULE__, &Map.update!(&1, key, fun))
+
+  @doc "Removes and returns the value under `sub` of the map at `key`, if any."
+  def pop(key, sub) do
+    Agent.get_and_update(__MODULE__, fn state ->
+      {value, rest} = Map.pop(Map.fetch!(state, key), sub)
+      {value, Map.put(state, key, rest)}
+    end)
+  end
+
+  @doc """
+  Runs the hook registered under `sub` of `key` once, in the calling process
+  and outside the Agent, so it can call the fakes and the pipeline.
+  """
+  def run_hook(key, sub) do
+    case pop(key, sub) do
+      nil -> :ok
+      fun -> fun.()
+    end
+  end
 
   @doc "Takes the next scripted value of a queue; the last one repeats forever."
   def next(key, sub, default) do

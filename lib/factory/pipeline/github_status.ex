@@ -35,7 +35,9 @@ defmodule Factory.Pipeline.GitHubStatus do
 
     if old != new do
       if old, do: GitHub.impl().set_label(repo, now.number, old, false)
-      if new, do: GitHub.impl().set_label(repo, now.number, new, true)
+      # A cancellation may have landed since this transition: never label a stopped issue.
+      if new && not Factory.Pipeline.stopped?(now),
+        do: GitHub.impl().set_label(repo, now.number, new, true)
     end
 
     if now.state == "done" and before.state != "done", do: merged(now)

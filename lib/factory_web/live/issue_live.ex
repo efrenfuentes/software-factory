@@ -18,7 +18,7 @@ defmodule FactoryWeb.IssueLive do
      socket
      |> assign(now: DateTime.utc_now(), plan_tab: nil, plan_choice: nil)
      |> assign(can_operate: Scope.can?(socket.assigns.current_scope, :operate))
-     |> assign(feedback: feedback_form(""))
+     |> assign(feedback: feedback_form(""), pr_feedback: pr_feedback_form(""))
      |> load(String.to_integer(id))}
   end
 
@@ -59,7 +59,7 @@ defmodule FactoryWeb.IssueLive do
   # Reading is open to everyone signed in; acting on the issue is not.
   @impl true
   def handle_event(event, _params, %{assigns: %{can_operate: false}} = socket)
-      when event in ~w(approve request_changes stop) do
+      when event in ~w(approve request_changes request_pr_changes stop) do
     {:noreply, put_flash(socket, :error, "Your account can only read.")}
   end
 
@@ -118,6 +118,47 @@ defmodule FactoryWeb.IssueLive do
     end
   end
 
+  def handle_event("pr_feedback_changed", %{"pr_changes" => %{"feedback" => text}}, socket) do
+    {:noreply, assign(socket, pr_feedback: pr_feedback_form(text))}
+  end
+
+  def handle_event("request_pr_changes", %{"pr_changes" => %{"feedback" => text}}, socket) do
+    text = String.trim(text)
+
+    if text == "" do
+      {:noreply, put_flash(socket, :error, "Write what should change in the pull request.")}
+    else
+      case Poller.request_pr_changes(socket.assigns.issue, text, actor(socket)) do
+        {:ok, issue} ->
+          {:noreply,
+           socket
+           |> assign(pr_feedback: pr_feedback_form(""))
+           |> put_flash(
+             :info,
+             "Feedback sent. It is being posted on the pull request and the Developer is working on it."
+           )
+           |> load(issue.id)}
+
+        {:error, :not_accepting_pr_changes} ->
+          {:noreply,
+           socket
+           |> put_flash(:error, "This pull request is not waiting for changes.")
+           |> load(socket.assigns.issue.id)}
+
+        {:error, :pr_not_open} ->
+          {:noreply, put_flash(socket, :error, "The pull request is no longer open.")}
+
+        {:error, reason} ->
+          {:noreply,
+           put_flash(
+             socket,
+             :error,
+             "Could not read the pull request on GitHub: #{inspect(reason)}"
+           )}
+      end
+    end
+  end
+
   def handle_event("stop", _params, socket) do
     {:ok, issue} = Poller.stop(socket.assigns.issue, actor(socket))
     {:noreply, socket |> put_flash(:info, "Stopped.") |> load(issue.id)}
@@ -126,6 +167,7 @@ defmodule FactoryWeb.IssueLive do
   defp actor(socket), do: Scope.name(socket.assigns.current_scope)
 
   defp feedback_form(text), do: to_form(%{"feedback" => text}, as: :review)
+  defp pr_feedback_form(text), do: to_form(%{"feedback" => text}, as: :pr_changes)
 
   defp plan_label("spec.md"), do: "Spec"
   defp plan_label("plan.md"), do: "Plan"
@@ -250,6 +292,41 @@ defmodule FactoryWeb.IssueLive do
           />
         </div>
       </div>
+
+      <section
+        :if={@can_operate and Issue.accepts_pr_changes?(@issue)}
+        id="pr-feedback"
+        class="mt-3 rounded-lg border border-base-300 bg-base-100"
+      >
+        <.form
+          for={@pr_feedback}
+          id="pr-feedback-form"
+          phx-change="pr_feedback_changed"
+          phx-submit="request_pr_changes"
+          class="px-4 py-4 sm:px-6"
+        >
+          <.input
+            field={@pr_feedback[:feedback]}
+            type="textarea"
+            label="Request changes to the pull request"
+            placeholder={"What should change in pull request ##{@issue.pr_number}?"}
+            rows="3"
+          />
+          <p class="-mt-1 text-xs text-base-content/60">
+            Posted on the pull request as your comment; the Developer then works on it and the Reviewer checks it again.
+          </p>
+          <div class="mt-3 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <.button
+              id="request-pr-changes-button"
+              type="submit"
+              variant="primary"
+              phx-disable-with="Sending…"
+            >
+              Request changes
+            </.button>
+          </div>
+        </.form>
+      </section>
 
       <section
         :if={@plan != []}
