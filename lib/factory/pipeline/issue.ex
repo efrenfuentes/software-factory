@@ -29,6 +29,9 @@ defmodule Factory.Pipeline.Issue do
     field :hold_detail, :string
     field :resume_state, :string
     field :comments_seen_at, :utc_datetime_usec
+    field :pr_feedback, :string
+    field :pr_decisions, :string
+    field :pr_comments_seen_at, :utc_datetime_usec
 
     field :cost_usd, :decimal, virtual: true
 
@@ -50,4 +53,16 @@ defmodule Factory.Pipeline.Issue do
   def active?(%__MODULE__{state: state}), do: state in @active
   def waiting?(%__MODULE__{state: state}), do: state in @waiting
   def terminal?(%__MODULE__{state: state}), do: state in @terminal
+
+  @doc """
+  Whether a person can ask for changes to the pull request now: it waits for a
+  merge, or for a decision after the automatic review rounds ran out.
+  """
+  def accepts_pr_changes?(%__MODULE__{pr_number: nil}), do: false
+  def accepts_pr_changes?(%__MODULE__{state: "ready_to_merge"}), do: true
+
+  def accepts_pr_changes?(%__MODULE__{state: "needs_human", hold_reason: "pr_rounds_exhausted"}),
+    do: true
+
+  def accepts_pr_changes?(%__MODULE__{}), do: false
 end
