@@ -120,6 +120,132 @@ defmodule FactoryWeb.ProjectSecretsLiveTest do
     assert Secrets.list_secrets(project) == []
   end
 
+  # LiveViewTest has no browser: what it can show is that after each submission the
+  # fields are new elements (another id), which a browser renders from scratch with
+  # the server's value instead of keeping what was typed in the old ones.
+  defp field(view, selector) do
+    node = view |> render() |> LazyHTML.from_fragment() |> LazyHTML.query(selector)
+
+    %{
+      id: node |> LazyHTML.attribute("id") |> List.first(),
+      value: node |> LazyHTML.attribute("value") |> List.first(),
+      text: LazyHTML.text(node),
+      checked?: LazyHTML.attribute(node, "checked") != []
+    }
+  end
+
+  defp secret_fields(view) do
+    %{
+      name: field(view, "#secret-form input[name='secret[name]']"),
+      value: field(view, "#secret-form textarea[name='secret[value]']"),
+      checks: field(view, "#secret-form input[type=checkbox][name='secret[checks_only]']")
+    }
+  end
+
+  test "each submission renders the fields anew: all empty after an add, only the value after an error",
+       %{conn: conn, project: project} do
+    view = open(conn, project)
+    before = secret_fields(view)
+
+    add(view, %{name: "API_KEY", value: @value, checks_only: "true"})
+    added = secret_fields(view)
+
+    for key <- [:name, :value, :checks] do
+      assert added[key].id != before[key].id, "#{key} is the same element"
+    end
+
+    assert added.name.value in [nil, ""]
+    assert String.trim(added.value.text) == ""
+    refute added.checks.checked?
+
+    add(view, %{name: "PATH", value: @value, checks_only: "true"})
+    failed = secret_fields(view)
+    assert failed.value.id != added.value.id
+    assert String.trim(failed.value.text) == ""
+    assert failed.name.value == "PATH"
+    assert failed.checks.checked?
+    refute leaked?(view, @value)
+
+    # A failed replacement renders a new, empty value field too.
+    secret = row(project, "API_KEY")
+    view |> element("#replace-secret-#{secret.id}") |> render_click()
+    opened = field(view, "#replace-secret-form textarea[name='secret[value]']")
+
+    view
+    |> form("#replace-secret-form", secret: %{value: "7-chars", checks_only: "false"})
+    |> render_submit()
+
+    replaced = field(view, "#replace-secret-form textarea[name='secret[value]']")
+    assert replaced.id != opened.id
+    assert String.trim(replaced.text) == ""
+    refute leaked?(view, "7-chars")
+  end
+
+  describe "malformed events" do
+    setup %{conn: conn, project: project, user: user} do
+      {:ok, secret} =
+        Secrets.create_secret(project, %{"name" => "API_KEY", "value" => "first-value-1"}, user)
+
+      level = Logger.level()
+      on_exit(fn -> Logger.configure(level: level) end)
+
+      # Opened here so that the tests' logs are only those of the events.
+      capture_log(fn -> send(self(), {:view, open(conn, project)}) end)
+      assert_received {:view, view}
+      %{secret: secret, view: view, level: level}
+    end
+
+    test "add_secret with a name or checks_only that is not text is refused, the view goes on",
+         %{view: view, project: project, level: level} do
+      Logger.configure(level: :debug)
+
+      log =
+        capture_log([level: :debug], fn ->
+          for attrs <- [
+                %{"name" => %{"x" => "y"}},
+                %{"name" => ["API"]},
+                %{"name" => "OTHER", "checks_only" => nil},
+                %{"name" => "OTHER", "checks_only" => %{"x" => "y"}},
+                %{"name" => "OTHER", "checks_only" => ["true"]},
+                %{"name" => "OTHER", "checks_only" => "maybe"}
+              ] do
+            render_hook(view, "add_secret", %{"secret" => Map.put(attrs, "value", @value)})
+            assert Process.alive?(view.pid)
+          end
+        end)
+
+      Logger.configure(level: level)
+      assert [%{name: "API_KEY"}] = Secrets.list_secrets(project)
+      refute leaked?(view, @value)
+      refute log =~ @value
+    end
+
+    test "replace_secret with checks_only that is not a boolean is refused, the view goes on",
+         %{view: view, project: project, secret: secret, level: level} do
+      stored = row(project, "API_KEY")
+      Logger.configure(level: :debug)
+
+      log =
+        capture_log([level: :debug], fn ->
+          for checks_only <- [nil, "maybe", %{"x" => "y"}, ["true"]] do
+            view |> element("#replace-secret-#{secret.id}") |> render_click()
+
+            render_hook(view, "replace_secret", %{
+              "secret" => %{"value" => @value, "checks_only" => checks_only}
+            })
+
+            assert Process.alive?(view.pid)
+            assert has_element?(view, "#replace-secret-form")
+          end
+        end)
+
+      Logger.configure(level: level)
+      assert row(project, "API_KEY") == stored
+      refute leaked?(view, @value)
+      refute log =~ @value
+    end
+  end
+
   test "the page for a new project has no secrets", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/projects/new")
     refute has_element?(view, "#project-secrets")

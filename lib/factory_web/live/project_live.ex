@@ -43,7 +43,8 @@ defmodule FactoryWeb.ProjectLive do
       fingerprint: Secrets.current_fingerprint(),
       secret_form: secret_form(),
       replacing: nil,
-      replace_form: nil
+      replace_form: nil,
+      fields_version: 0
     )
     |> stream_secrets()
   end
@@ -54,11 +55,35 @@ defmodule FactoryWeb.ProjectLive do
   end
 
   # The value a person typed never goes back to the page: the form keeps only the
-  # name and the checkbox, with the errors.
+  # name and the checkbox, with the errors, and only when they are what a form sends.
   defp secret_form(changeset \\ Secrets.change_secret()) do
-    params = if changeset.params, do: Map.put(changeset.params, "value", ""), else: nil
-    to_form(%{changeset | params: params}, as: :secret)
+    to_form(%{changeset | params: safe_params(changeset.params, ~w(name checks_only))},
+      as: :secret
+    )
   end
+
+  defp safe_params(nil, _fields), do: nil
+
+  # A field sent as something else than its form sends goes back empty (unchecked),
+  # still shown with its error.
+  defp safe_params(params, fields) do
+    for field <- fields, Map.has_key?(params, field), into: %{"value" => ""} do
+      {field, safe(field, params[field])}
+    end
+  end
+
+  defp safe("checks_only", value) when value in ["true", "false"], do: value
+  defp safe("checks_only", _value), do: "false"
+  defp safe(_field, value) when is_binary(value), do: value
+  defp safe(_field, _value), do: ""
+
+  # Only the fields of the form, whatever else an event carries.
+  defp secret_attrs(attrs, fields), do: Map.take(attrs, fields)
+
+  # Each submission renders the secret fields as new elements (new ids), so the
+  # browser drops what was typed: an unchanged empty value sends no update, and
+  # would leave the typed one in place.
+  defp new_fields(socket), do: update(socket, :fields_version, &(&1 + 1))
 
   defp edit(socket, project, title) do
     assign(socket,
@@ -103,6 +128,9 @@ defmodule FactoryWeb.ProjectLive do
   defp manage("add_secret", params, socket) do
     with :edit <- socket.assigns.live_action,
          %{"secret" => %{} = attrs} <- params do
+      attrs = secret_attrs(attrs, ~w(name value checks_only))
+      socket = new_fields(socket)
+
       case Secrets.create_secret(socket.assigns.project, attrs, socket.assigns.current_scope.user) do
         {:ok, secret} ->
           {:noreply,
@@ -145,6 +173,9 @@ defmodule FactoryWeb.ProjectLive do
   defp manage("replace_secret", params, %{assigns: %{live_action: :edit}} = socket) do
     with %{"secret" => %{} = attrs} <- params,
          %{} = secret <- Secrets.get_secret(socket.assigns.project, socket.assigns.replacing) do
+      attrs = secret_attrs(attrs, ~w(value checks_only))
+      socket = new_fields(socket)
+
       case Secrets.replace_secret(secret, attrs, socket.assigns.current_scope.user) do
         {:ok, secret} ->
           {:noreply,
@@ -196,8 +227,10 @@ defmodule FactoryWeb.ProjectLive do
   end
 
   defp replace_form(changeset) do
-    params = if changeset.params, do: Map.put(changeset.params, "value", ""), else: nil
-    to_form(%{changeset | params: params}, as: :secret, id: "replace-secret")
+    to_form(%{changeset | params: safe_params(changeset.params, ~w(checks_only))},
+      as: :secret,
+      id: "replace-secret"
+    )
   end
 
   defp no_key(socket),
@@ -436,6 +469,7 @@ defmodule FactoryWeb.ProjectLive do
           secret_form={@secret_form}
           replacing={@replacing}
           replace_form={@replace_form}
+          fields_version={@fields_version}
         />
       </div>
     </Layouts.app>
@@ -448,6 +482,7 @@ defmodule FactoryWeb.ProjectLive do
   attr :secret_form, :any, required: true
   attr :replacing, :any, default: nil
   attr :replace_form, :any, default: nil
+  attr :fields_version, :integer, required: true
 
   # Its own card, with forms of its own: a secret is saved on its own, never with the project.
   defp secrets_card(assigns) do
@@ -552,6 +587,7 @@ defmodule FactoryWeb.ProjectLive do
             >
               <.input
                 field={@replace_form[:value]}
+                id={"replace-secret-value-#{@fields_version}"}
                 type="textarea"
                 label="New value"
                 rows="3"
@@ -561,6 +597,7 @@ defmodule FactoryWeb.ProjectLive do
               />
               <.input
                 field={@replace_form[:checks_only]}
+                id={"replace-secret-checks-only-#{@fields_version}"}
                 type="checkbox"
                 label="Only for the checks"
               />
@@ -585,6 +622,7 @@ defmodule FactoryWeb.ProjectLive do
           <fieldset disabled={not @secrets_key?} class="disabled:opacity-60">
             <.input
               field={@secret_form[:name]}
+              id={"secret-name-#{@fields_version}"}
               label="Name"
               placeholder="API_KEY"
               autocomplete="off"
@@ -592,6 +630,7 @@ defmodule FactoryWeb.ProjectLive do
             />
             <.input
               field={@secret_form[:value]}
+              id={"secret-value-#{@fields_version}"}
               type="textarea"
               label="Value"
               rows="3"
@@ -600,6 +639,7 @@ defmodule FactoryWeb.ProjectLive do
             />
             <.input
               field={@secret_form[:checks_only]}
+              id={"secret-checks-only-#{@fields_version}"}
               type="checkbox"
               label="Only for the checks"
             />

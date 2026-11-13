@@ -25,13 +25,16 @@ defmodule Factory.Secrets.ProjectSecret do
     timestamps(type: :utc_datetime)
   end
 
-  @doc "A new secret: name, value and whether only the checks get it."
+  @doc """
+  A new secret: name, value and whether only the checks get it. `checks_only`
+  may be left out (false), but not given as nil or as anything but a boolean.
+  """
   def create_changeset(secret, attrs) do
     secret
     |> cast(attrs, [:name, :value, :checks_only])
     |> update_change(:name, &String.trim/1)
     |> normalize_value()
-    |> validate_required([:name, :value])
+    |> validate_required([:name, :value, :checks_only])
     |> validate_name()
     |> validate_value()
     |> unique_constraint([:project_id, :name],
@@ -44,6 +47,7 @@ defmodule Factory.Secrets.ProjectSecret do
   def replace_changeset(secret, attrs) do
     secret
     |> cast(attrs, [:value, :checks_only])
+    |> validate_required([:checks_only])
     |> normalize_value()
     |> validate_value()
   end

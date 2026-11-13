@@ -94,6 +94,26 @@ defmodule Factory.SecretsTest do
       assert create_errors(%{"name" => "DATABASE_URL"}) == %{}
     end
 
+    test "checks_only may be left out, but must be a boolean when given" do
+      assert create_errors(%{}) == %{}
+      assert create_errors(%{"checks_only" => "true"}) == %{}
+
+      for bad <- [nil, "maybe", %{"a" => "b"}, ["true"]] do
+        assert %{checks_only: [_]} = create_errors(%{"checks_only" => bad}), inspect(bad)
+
+        replace =
+          ProjectSecret.replace_changeset(%ProjectSecret{checks_only: false}, %{
+            "value" => @value,
+            "checks_only" => bad
+          })
+
+        assert %{checks_only: [_]} = errors_on(replace), inspect(bad)
+      end
+
+      replace = ProjectSecret.replace_changeset(%ProjectSecret{checks_only: true}, %{})
+      assert replace.valid?
+    end
+
     test "values are at least 8 characters, at most 32 768 bytes, without NUL" do
       assert %{value: ["should be at least 8 character(s)"]} =
                create_errors(%{"value" => "1234567"})
@@ -313,6 +333,35 @@ defmodule Factory.SecretsTest do
                %{"a" => ["[SECRET:API_KEY]", %{"b" => "[SECRET:API_KEY]"}], "n" => 1}
 
       assert Secrets.redact(nil, "tok\"en-1234") == "tok\"en-1234"
+    end
+
+    test "a line counts its characters, not its bytes, against the minimum of 8" do
+      # 4 two-byte letters (8 bytes) and 4 graphemes of a letter and a combining accent.
+      combining = "e\u0301a\u0301i\u0301o\u0301"
+      value = "áéíó\n#{combining}\nlong-line-value"
+      bundle = Bundle.new([entry("ACCENTS", value)])
+
+      assert Secrets.leaked(bundle, ["only áéíó here"]) == []
+      assert Secrets.leaked(bundle, ["only #{combining} here"]) == []
+      assert Secrets.redact(bundle, "áéíó #{combining}") == "áéíó #{combining}"
+      assert Secrets.leaked(bundle, ["x long-line-value"]) == ["ACCENTS"]
+      assert Secrets.leaked(bundle, ["the whole #{value}"]) == ["ACCENTS"]
+      assert Secrets.redact(bundle, "the whole #{value}") == "the whole [SECRET:ACCENTS]"
+      assert Secrets.redact(bundle, Jason.encode!(value)) == ~s("[SECRET:ACCENTS]")
+
+      # Eight multibyte characters are a line of their own.
+      bundle = Bundle.new([entry("EIGHT", "áéíóúñüç\nother-line-x")])
+      assert Secrets.leaked(bundle, ["áéíóúñüç"]) == ["EIGHT"]
+    end
+
+    test "each line of a multiline value is also found in its JSON form" do
+      line = ~s(quote"and\\backslash-line)
+      bundle = Bundle.new([entry("MULTI", "first-line-1\n#{line}\nlast")])
+
+      assert Secrets.redact(bundle, Jason.encode!(%{"result" => line})) ==
+               ~s({"result":"[SECRET:MULTI]"})
+
+      assert Secrets.redact(bundle, "raw #{line}") == "raw [SECRET:MULTI]"
     end
 
     test "leaked/2 searches each block on its own" do
