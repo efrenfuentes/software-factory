@@ -314,6 +314,7 @@ defmodule Factory.Pipeline do
       row = lock!(issue.id)
       if not Issue.accepts_pr_changes?(row), do: Repo.rollback(:not_accepting_pr_changes)
 
+      # `{:ok, _}` is the only answer that lets the request go on.
       case (opts[:before_commit] || fn _ -> {:ok, row} end).(row) do
         {:ok, _} -> :ok
         {:error, reason} -> Repo.rollback(reason)
