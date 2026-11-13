@@ -83,6 +83,71 @@ defmodule Factory.GitHub.CLI do
     end
   end
 
+  @doc """
+  The text of the submitted reviews of a pull request and their comments on
+  lines. Either everything is read or nothing is: a failure on any of the two
+  reads is returned as is.
+  """
+  @impl true
+  def pr_review_comments(repo, number, fetch \\ &gh_lines/1) do
+    with {:ok, reviews} <- fetch.("repos/#{repo}/pulls/#{number}/reviews"),
+         {:ok, comments} <- fetch.("repos/#{repo}/pulls/#{number}/comments") do
+      {:ok, review_comments(reviews, comments)}
+    end
+  end
+
+  @doc """
+  Turns the REST payloads of reviews and review comments into review comments.
+  Pending (unsent) reviews and their comments, and empty texts, are left out. A
+  comment on a line is dated when its review was submitted, not when it was drafted.
+  """
+  def review_comments(reviews, comments) do
+    pending =
+      for review <- reviews, review["state"] == "PENDING", into: MapSet.new(), do: review["id"]
+
+    submitted =
+      for review <- reviews, review["state"] != "PENDING", into: %{} do
+        {review["id"], review["submitted_at"]}
+      end
+
+    texts =
+      for review <- reviews, review["state"] != "PENDING", present?(review["body"]) do
+        %{
+          author: login(review),
+          body: review["body"],
+          created_at: datetime(review["submitted_at"]),
+          path: nil,
+          line: nil
+        }
+      end
+
+    on_lines =
+      for comment <- comments,
+          not MapSet.member?(pending, comment["pull_request_review_id"]),
+          present?(comment["body"]) do
+        %{
+          author: login(comment),
+          body: comment["body"],
+          created_at:
+            datetime(
+              Map.get(submitted, comment["pull_request_review_id"]) || comment["created_at"]
+            ),
+          path: comment["path"],
+          line: comment["line"] || comment["original_line"]
+        }
+      end
+
+    Enum.sort_by(texts ++ on_lines, & &1.created_at, DateTime)
+  end
+
+  defp present?(text), do: is_binary(text) and String.trim(text) != ""
+  defp login(item), do: get_in(item, ["user", "login"]) || ""
+
+  defp datetime(text) do
+    {:ok, at, _} = DateTime.from_iso8601(text)
+    at
+  end
+
   @impl true
   def set_label(repo, number, label, true) do
     color = Map.get(@label_colors, label, "D93F0B")
@@ -109,6 +174,31 @@ defmodule Factory.GitHub.CLI do
     case Shell.run("gh", ~w(api user --jq .login)) do
       {:ok, login} -> {:ok, String.trim(login)}
       {:error, reason} -> {:error, Shell.describe(reason)}
+    end
+  end
+
+  # Every item of a paginated REST list, one JSON document per line.
+  defp gh_lines(path) do
+    case Shell.run("gh", ["api", path, "--paginate", "--jq", ".[] | @json"],
+           timeout: :timer.seconds(60)
+         ) do
+      {:ok, output} ->
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.reject(&(String.trim(&1) == ""))
+        |> Enum.reduce_while({:ok, []}, fn line, {:ok, acc} ->
+          case Jason.decode(line) do
+            {:ok, item} -> {:cont, {:ok, [item | acc]}}
+            {:error, error} -> {:halt, {:error, error}}
+          end
+        end)
+        |> case do
+          {:ok, items} -> {:ok, Enum.reverse(items)}
+          error -> error
+        end
+
+      {:error, reason} ->
+        {:error, Shell.describe(reason)}
     end
   end
 
