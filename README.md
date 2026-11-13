@@ -126,6 +126,10 @@ ready_to_merge ──merge de una persona──▶ done
   contain the value of a project secret") con un comentario que nombra el secreto, y al
   aprobarlo el Developer recibe el encargo de quitarlo de los commits sin publicar.
   Necesita git ≥ 2.36 (`--remerge-diff`); con uno anterior la revisión falla y no hay push.
+  Lo revisado y lo publicado es el mismo commit, el de la rama del issue (se empuja ese
+  SHA a esa rama); si el worktree está en otra rama o con HEAD separado, la etapa falla
+  sin push. Ni `log.showRoot` ni `i18n.logOutputEncoding` del repositorio cambian lo
+  que se revisa, y el plan que muestra el panel también sale filtrado.
 - Si los secretos del proyecto no se pueden descifrar (falta la clave, es otra, o el dato
   está alterado), la etapa no lanza nada y el issue pasa a `failed` nombrándolos; se
   reintenta con `/factory retry` o el botón Retry tras corregirlo.
