@@ -93,12 +93,43 @@ defmodule Factory.Workspace.Git do
     end
   end
 
+  @doc """
+  The commit the issue's branch points to, which the check for secrets and the
+  push then use, so that what is checked is what is published. It is an error
+  when the worktree is not on that branch (another branch, or a detached HEAD).
+  """
   @impl true
-  def code_changed?(path, project) do
+  def head(path, issue) do
+    expected = "refs/heads/#{issue.branch}"
+
+    with {:ok, ref} <- current_ref(path),
+         :ok <- same_ref(ref, expected),
+         {:ok, sha} <- git(path, ["rev-parse", "--verify", "--quiet", expected <> "^{commit}"]) do
+      {:ok, String.trim(sha)}
+    else
+      {:error, reason} -> {:error, describe(reason)}
+    end
+  end
+
+  defp current_ref(path) do
+    case git(path, ~w(symbolic-ref --quiet HEAD)) do
+      {:ok, ref} -> {:ok, String.trim(ref)}
+      {:error, {:exit, _, _}} -> {:ok, "a detached HEAD"}
+      error -> error
+    end
+  end
+
+  defp same_ref(ref, ref), do: :ok
+
+  defp same_ref(ref, expected),
+    do: {:error, "the worktree is on #{ref}, not on #{expected}: nothing is pushed"}
+
+  @impl true
+  def code_changed?(path, project, sha) do
     args = [
       "diff",
       "--quiet",
-      "origin/#{project.base_branch}...HEAD",
+      "origin/#{project.base_branch}...#{sha}",
       "--",
       ".",
       ":(exclude).factory"
@@ -107,43 +138,55 @@ defmodule Factory.Workspace.Git do
     match?({:error, {:exit, 1, _}}, git(path, args))
   end
 
+  @doc "Publishes the commit `sha` (from `head/2`) as the issue's branch, and only that."
   @impl true
-  def push(path, issue) do
-    case git(path, ~w(push -u origin #{issue.branch})) do
-      {:ok, _} -> :ok
-      {:error, reason} -> {:error, describe(reason)}
+  def push(path, issue, sha) do
+    case git(path, ["push", "origin", "#{sha}:refs/heads/#{issue.branch}"]) do
+      {:ok, _} ->
+        # A commit is not a branch, so the push alone does not set the upstream.
+        git(path, ["branch", "--set-upstream-to=origin/#{issue.branch}", issue.branch])
+        :ok
+
+      {:error, reason} ->
+        {:error, describe(reason)}
     end
   end
 
   @doc """
-  The commits a push would send are those reachable from `HEAD` but not from
-  `origin/<base>` nor, once pushed, `origin/<branch>`. Their messages and the
-  lines they add are returned as blocks; a two-parent merge adds what differs
-  from the automatic merge of its parents (`--remerge-diff`, git >= 2.36).
+  The commits a push of `sha` would send are those reachable from it but not
+  from `origin/<base>` nor, once pushed, `origin/<branch>`. Their messages and
+  the lines they add are returned as blocks; a two-parent merge adds what
+  differs from the automatic merge of its parents (`--remerge-diff`, git >= 2.36).
 
   The patch is asked for so that nothing the repository configures can hide or
-  transform its content: no textconv, no external diff, binary files as text.
-  A merge git cannot diff that way (three or more parents) is an error.
+  transform its content: no textconv, no external diff, binary files as text,
+  root commits always diffed (`--root`, whatever `log.showRoot` says). Each
+  message is given twice: as stored (`--encoding=none`) and in UTF-8, whatever
+  `i18n.logOutputEncoding` says. A merge git cannot diff that way (three or
+  more parents) is an error.
   """
   @impl true
-  def unpushed_changes(path, project, issue) do
-    range = ["HEAD", "--not", "origin/#{project.base_branch}"] ++ pushed_branch(path, issue)
+  def unpushed_changes(path, project, issue, sha) do
+    range = [sha, "--not", "origin/#{project.base_branch}"] ++ pushed_branch(path, issue)
 
     patch_args =
-      ~w(log -p --no-color --no-ext-diff --no-textconv --text --no-renames
-         --diff-merges=remerge --format=tformat:factory-commit) ++ range
+      ~w(log -p --root --no-color --no-ext-diff --no-textconv --text --no-renames
+         --no-relative --diff-merges=remerge --format=tformat:factory-commit) ++ range
 
-    with {:ok, messages} <- git(path, ["log", "-z", "--format=%B" | range]),
+    with {:ok, raw} <- git(path, ["log", "-z", "--encoding=none", "--format=%B" | range]),
+         {:ok, utf8} <- git(path, ["log", "-z", "--encoding=UTF-8", "--format=%B" | range]),
          {:ok, octopus} <- git(path, ["rev-list", "--min-parents=3" | range]),
          :ok <- no_octopus(octopus),
          {:ok, patch} <- git(path, patch_args),
          :ok <- no_diff_warning(patch) do
-      messages = messages |> String.split(<<0>>) |> Enum.reject(&(String.trim(&1) == ""))
-      {:ok, messages ++ added_blocks(patch)}
+      {:ok, Enum.uniq(messages(raw) ++ messages(utf8)) ++ added_blocks(patch)}
     else
       {:error, reason} -> {:error, describe(reason)}
     end
   end
+
+  defp messages(output),
+    do: output |> String.split(<<0>>) |> Enum.reject(&(String.trim(&1) == ""))
 
   defp pushed_branch(path, issue) do
     case git(path, ~w(rev-parse --verify --quiet origin/#{issue.branch})) do

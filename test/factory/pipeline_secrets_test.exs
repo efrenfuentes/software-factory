@@ -311,6 +311,35 @@ defmodule Factory.PipelineSecretsTest do
       assert pr() == nil
     end
 
+    test "the commit checked for secrets is the one pushed", %{project: project, user: user} do
+      add_secret(project, user, "API_KEY", @value)
+      Fakes.Workspace.set_head({:ok, "plan-sha"})
+      Fakes.Agent.during(:developer, fn -> Fakes.Workspace.set_head({:ok, "code-sha"}) end)
+
+      assert %{state: "ready_to_merge"} = project |> track() |> drive()
+      assert Fakes.Workspace.pushed_shas() == [{7, "plan-sha"}, {7, "code-sha"}]
+      assert "plan-sha" in Fakes.Workspace.checked_shas()
+      assert "code-sha" in Fakes.Workspace.checked_shas()
+      refute Enum.any?(Fakes.Workspace.checked_shas(), &(&1 not in ["plan-sha", "code-sha"]))
+    end
+
+    test "a worktree that is not on the issue's branch is never pushed", %{
+      project: project,
+      user: user
+    } do
+      add_secret(project, user, "API_KEY", @value)
+
+      Fakes.Agent.during(:developer, fn ->
+        Fakes.Workspace.set_head({:error, "the worktree is on refs/heads/innocent"})
+      end)
+
+      issue = project |> track() |> drive()
+      assert issue.state == "failed"
+      assert issue.hold_detail =~ "refs/heads/innocent"
+      assert Fakes.Workspace.pushes() == [7]
+      assert pr() == nil
+    end
+
     test "nor when that happens on the push of the code", %{project: project, user: user} do
       add_secret(project, user, "API_KEY", @value)
 

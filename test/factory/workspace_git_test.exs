@@ -40,6 +40,11 @@ defmodule Factory.Workspace.GitTest do
     output
   end
 
+  defp head!(path) do
+    {:ok, sha} = Git.head(path, @issue)
+    sha
+  end
+
   test "plans and code go to the issue's branch, and work resumes from what was pushed", %{
     origin: origin
   } do
@@ -62,16 +67,16 @@ defmodule Factory.Workspace.GitTest do
 
     refute File.exists?(Path.join(path, "stray.txt"))
     assert File.read!(Path.join(path, "README.md")) == "app\n"
-    refute Git.code_changed?(path, @project)
+    refute Git.code_changed?(path, @project, head!(path))
 
     # Nothing to commit is not an error.
     assert :ok = Git.commit(path, "Work on #7", [])
 
     File.write!(Path.join(path, "lib.ex"), "code")
     assert :ok = Git.commit(path, "Work on #7", [])
-    assert Git.code_changed?(path, @project)
+    assert Git.code_changed?(path, @project, head!(path))
 
-    assert :ok = Git.push(path, @issue)
+    assert :ok = Git.push(path, @issue, head!(path))
     assert git!(origin, ~w(log --format=%s factory/issue-7)) == "Work on #7\nPlan for #7\ninit\n"
 
     assert :ok = Git.cleanup(@project, @issue)
@@ -133,11 +138,11 @@ defmodule Factory.Workspace.GitTest do
     end
   end
 
-  describe "unpushed_changes/3" do
-    setup %{clone: clone} do
+  describe "unpushed_changes/4" do
+    setup %{clone: clone, origin: origin} do
       {:ok, path} = Git.prepare(@project, @issue)
       on_exit(fn -> Current.delete() end)
-      %{path: path, clone: clone}
+      %{path: path, clone: clone, origin: origin}
     end
 
     defp commit!(dir, file, content, message) do
@@ -152,7 +157,7 @@ defmodule Factory.Workspace.GitTest do
     end
 
     defp blocks(path) do
-      assert {:ok, blocks} = Git.unpushed_changes(path, @project, @issue)
+      assert {:ok, blocks} = Git.unpushed_changes(path, @project, @issue, head!(path))
       blocks
     end
 
@@ -175,7 +180,7 @@ defmodule Factory.Workspace.GitTest do
       assert "code\n" in blocks
       assert Secrets.leaked(bundle([{"API_KEY", "not-there-123"}]), blocks) == []
 
-      assert :ok = Git.push(path, @issue)
+      assert :ok = Git.push(path, @issue, head!(path))
       assert blocks(path) == []
     end
 
@@ -204,7 +209,7 @@ defmodule Factory.Workspace.GitTest do
       assert in_some?(blocks(path), "abcd\nefgh\n")
       assert Secrets.leaked(secret, blocks(path)) == ["SHORT_LINES"]
 
-      assert :ok = Git.push(path, @issue)
+      assert :ok = Git.push(path, @issue, head!(path))
       commit!(path, "one.txt", "abcd\n", "one")
       commit!(path, "two.txt", "efgh\n", "two")
       assert Secrets.leaked(secret, blocks(path)) == []
@@ -219,7 +224,7 @@ defmodule Factory.Workspace.GitTest do
     test "a value written to resolve a merge conflict is found", %{path: path, clone: clone} do
       push_to_main!(clone, path, "c.txt", "base\n")
       git!(path, ~w(merge --quiet --ff-only origin/main))
-      assert :ok = Git.push(path, @issue)
+      assert :ok = Git.push(path, @issue, head!(path))
 
       commit!(path, "c.txt", "branch\n", "branch change")
       push_to_main!(clone, path, "c.txt", "main\n")
@@ -254,12 +259,12 @@ defmodule Factory.Workspace.GitTest do
       git!(path, ~w(commit --quiet -m octopus))
       sha = path |> git!(~w(rev-parse HEAD)) |> String.trim()
 
-      assert {:error, message} = Git.unpushed_changes(path, @project, @issue)
+      assert {:error, message} = Git.unpushed_changes(path, @project, @issue, head!(path))
       assert message =~ sha
       refute message =~ "O-octopus-value"
 
-      assert :ok = Git.push(path, @issue)
-      assert {:ok, []} = Git.unpushed_changes(path, @project, @issue)
+      assert :ok = Git.push(path, @issue, head!(path))
+      assert {:ok, []} = Git.unpushed_changes(path, @project, @issue, head!(path))
     end
 
     test "neither textconv nor -diff hide a value", %{path: path} do
@@ -273,9 +278,81 @@ defmodule Factory.Workspace.GitTest do
       refute in_some?(blocks, "xxxxxx")
       assert Secrets.leaked(secret, blocks) == ["HIDDEN"]
 
-      assert :ok = Git.push(path, @issue)
+      assert :ok = Git.push(path, @issue, head!(path))
       commit!(path, "d.txt", "SECRETVALUE123\n", "binary")
       assert Secrets.leaked(secret, blocks(path)) == ["HIDDEN"]
+    end
+
+    test "messages are read whatever i18n.logOutputEncoding says, non-ASCII included", %{
+      path: path
+    } do
+      secret = bundle([{"MSG", "project secrets in a message"}, {"ACCENT", "Ñandú-sécret-42"}])
+      git!(path, ~w(config i18n.logOutputEncoding UTF-16LE))
+
+      git!(path, ["commit", "--quiet", "--allow-empty", "-m", "uses project secrets in a message"])
+
+      git!(path, ["commit", "--quiet", "--allow-empty", "-m", "contraseña: Ñandú-sécret-42"])
+
+      assert Secrets.leaked(secret, blocks(path)) == ["ACCENT", "MSG"]
+    end
+
+    test "a message stored in another encoding is also read in UTF-8", %{path: path} do
+      secret = bundle([{"LATIN", "contraseña-ñandú"}])
+      file = Path.join(path, "../msg-latin1.txt")
+      File.write!(file, :unicode.characters_to_binary("usa contraseña-ñandú", :utf8, :latin1))
+      git!(path, ~w(-c i18n.commitEncoding=ISO-8859-1 commit --quiet --allow-empty -F #{file}))
+
+      assert Secrets.leaked(secret, blocks(path)) == ["LATIN"]
+    end
+
+    test "a root commit merged from an unrelated history is diffed whatever log.showRoot says",
+         %{path: path} do
+      secret = bundle([{"ROOT", "R-root-secret-77"}])
+      commit!(path, "mine.txt", "mine\n", "branch work")
+      git!(path, ~w(checkout --quiet --orphan unrelated))
+      git!(path, ~w(rm -rf --quiet .))
+      commit!(path, "root.txt", "R-root-secret-77\n", "unrelated root")
+      git!(path, ~w(checkout --quiet factory/issue-7))
+      git!(path, ~w(merge --quiet --no-edit --allow-unrelated-histories unrelated))
+      git!(path, ~w(config log.showRoot false))
+
+      assert Secrets.leaked(secret, blocks(path)) == ["ROOT"]
+    end
+
+    test "a worktree on another branch than the issue's cannot be checked nor pushed", %{
+      path: path,
+      origin: origin
+    } do
+      commit!(path, "s.txt", "S-pending-secret-9\n", "secret on the issue's branch")
+      git!(path, ~w(checkout --quiet -b innocent))
+      commit!(path, "ok.txt", "fine\n", "innocent work")
+
+      assert {:error, message} = Git.head(path, @issue)
+      assert message =~ "refs/heads/innocent"
+      assert message =~ "refs/heads/factory/issue-7"
+
+      git!(path, ~w(checkout --quiet --detach))
+      assert {:error, message} = Git.head(path, @issue)
+      assert message =~ "detached HEAD"
+
+      {_, status} = System.cmd("git", ~w(rev-parse --verify --quiet factory/issue-7), cd: origin)
+      assert status != 0
+    end
+
+    test "the commit checked is the one pushed, even if the branch moves after", %{
+      path: path,
+      origin: origin
+    } do
+      commit!(path, "a.txt", "clean\n", "checked")
+      sha = head!(path)
+      assert Secrets.leaked(bundle([{"LATE", "L-late-secret-5"}]), blocks(path)) == []
+      commit!(path, "b.txt", "L-late-secret-5\n", "added after the check")
+
+      assert :ok = Git.push(path, @issue, sha)
+      assert git!(origin, ~w(rev-parse factory/issue-7)) == sha <> "\n"
+
+      assert git!(path, ~w(rev-parse --abbrev-ref factory/issue-7@{upstream})) ==
+               "origin/factory/issue-7\n"
     end
 
     test "an added line after blank context is found with suppressBlankEmpty", %{
@@ -310,7 +387,7 @@ defmodule Factory.Workspace.GitTest do
         File.chmod!(hook, 0o755)
         Current.put(bundle([{"API_KEY", value}]))
 
-        assert {:error, message} = Git.push(path, @issue)
+        assert {:error, message} = Git.push(path, @issue, head!(path))
         refute message =~ String.slice(value, -4, 4)
         refute message =~ value
         # With the shorter filler, the whole value falls inside the cut: it is replaced.

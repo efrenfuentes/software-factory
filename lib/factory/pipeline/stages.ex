@@ -181,8 +181,10 @@ defmodule Factory.Pipeline.Stages do
         # Values left in the commits not pushed yet, e.g. after a push was refused for them;
         # if they cannot be read, the push asks again and fails.
         leaked_secrets:
-          case leaked_secrets(issue, project, path) do
-            {:ok, names} -> names
+          with {:ok, sha} <- Workspace.impl().head(path, issue),
+               {:ok, names} <- leaked_secrets(issue, project, path, sha) do
+            names
+          else
             {:error, _} -> []
           end,
         base_branch: project.base_branch
@@ -299,7 +301,8 @@ defmodule Factory.Pipeline.Stages do
            unless_stopped(issue, fn ->
              ws.commit(path, "Plan for ##{issue.number}", only: Workspace.plan_dir(issue))
            end),
-         :ok <- push(issue, project, path) do
+         {:ok, sha} <- ws.head(path, issue),
+         :ok <- push(issue, project, path, sha) do
       issue = Pipeline.update_issue(issue, %{difficulty: plan["difficulty"]})
 
       if issue.plan_round_limit == 0 do
@@ -440,11 +443,19 @@ defmodule Factory.Pipeline.Stages do
     end
   end
 
+  # What is compared with the base, checked for secrets and pushed is one commit:
+  # the one the issue's branch points to now.
   defp deliver(issue, project, path, work) do
+    with {:ok, sha} <- Workspace.impl().head(path, issue) do
+      deliver(issue, project, path, work, sha)
+    end
+  end
+
+  defp deliver(issue, project, path, work, sha) do
     ws = Workspace.impl()
 
     cond do
-      not ws.code_changed?(path, project) ->
+      not ws.code_changed?(path, project, sha) ->
         hold(
           issue,
           project,
@@ -454,7 +465,7 @@ defmodule Factory.Pipeline.Stages do
         )
 
       issue.pr_number ->
-        with :ok <- push(issue, project, path) do
+        with :ok <- push(issue, project, path, sha) do
           post_then(
             issue,
             project,
@@ -476,7 +487,7 @@ defmodule Factory.Pipeline.Stages do
             """)
           )
 
-        with :ok <- push(issue, project, path),
+        with :ok <- push(issue, project, path, sha),
              {:ok, pr} <-
                unless_stopped(issue, fn ->
                  GitHub.impl().create_pr(project.repo, %{
@@ -496,14 +507,14 @@ defmodule Factory.Pipeline.Stages do
     end
   end
 
-  # Pushes, unless the commits the push would send contain a secret value: then
-  # nothing is pushed and the issue waits for a person. If what would be sent
+  # Pushes `sha`, unless the commits the push would send contain a secret value:
+  # then nothing is pushed and the issue waits for a person. If what would be sent
   # cannot be read, nothing is pushed either and the stage fails.
-  defp push(issue, project, path) do
+  defp push(issue, project, path, sha) do
     ws = Workspace.impl()
 
-    with {:ok, []} <- leaked_secrets(issue, project, path) do
-      unless_stopped(issue, fn -> ws.push(path, issue) end)
+    with {:ok, []} <- leaked_secrets(issue, project, path, sha) do
+      unless_stopped(issue, fn -> ws.push(path, issue, sha) end)
     else
       {:ok, names} ->
         list = Enum.map_join(names, ", ", &"`#{&1}`")
@@ -533,10 +544,10 @@ defmodule Factory.Pipeline.Stages do
     end
   end
 
-  # The secrets whose values are in the commits not pushed yet.
-  defp leaked_secrets(issue, project, path) do
+  # The secrets whose values are in the commits a push of `sha` would send.
+  defp leaked_secrets(issue, project, path, sha) do
     if Secrets.any?(project.secrets) do
-      with {:ok, blocks} <- Workspace.impl().unpushed_changes(path, project, issue) do
+      with {:ok, blocks} <- Workspace.impl().unpushed_changes(path, project, issue, sha) do
         {:ok, Secrets.leaked(project.secrets, blocks)}
       end
     else
