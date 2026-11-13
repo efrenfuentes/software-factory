@@ -279,6 +279,23 @@ defmodule Factory.Secrets do
     }
   end
 
+  @hidden "Hidden: the project's secrets cannot be decrypted, so this file cannot be checked " <>
+            "for their values. Set FACTORY_SECRETS_KEY or write the secrets again to read it."
+
+  @doc """
+  Files to show (`%{name:, content:}`) with the project's secret values
+  replaced; when the secrets cannot be decrypted, their content is hidden. The
+  decrypted secrets are not kept.
+  """
+  def redact_files(_project, []), do: []
+
+  def redact_files(%Project{} = project, files) do
+    case load(project) do
+      {:ok, bundle} -> Enum.map(files, &%{&1 | content: redact(bundle, &1.content)})
+      {:error, _} -> Enum.map(files, &%{&1 | content: @hidden})
+    end
+  end
+
   @doc "Whether there is any secret value to look for."
   def any?(%Bundle{entries: [_ | _]}), do: true
   def any?(_), do: false
