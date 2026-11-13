@@ -5,6 +5,12 @@ defmodule Factory.Pipeline.Stages do
   The agents only produce a result; every decision about where the issue goes
   next — including counting review rounds and stopping for a person — is made
   here, in plain code.
+
+  A person can stop the issue while a stage runs. Agents and checks only start
+  if their run is recorded before that (`Pipeline.authorize_run/2`), and every
+  effect outside the factory — a comment, the `needs_human` label, a commit, a
+  push, a pull request — goes through `unless_stopped/2`, so nothing more
+  happens once the issue is cancelled.
   """
   alias Factory.{Agents, Gates, GitHub, Pipeline, Stacks, Workspace}
   alias Factory.Agents.Prompts
@@ -31,16 +37,28 @@ defmodule Factory.Pipeline.Stages do
       end
 
     case result do
-      {:ok, %Issue{} = issue} ->
-        if Issue.waiting?(issue),
-          do: GitHub.impl().set_label(project.repo, issue.number, @needs_human, true)
+      {:stopped, %Issue{} = issue} ->
+        {:ok, issue}
 
+      {:ok, %Issue{} = issue} ->
+        if Issue.waiting?(issue), do: label_needs_human(issue, project)
         {:ok, issue}
 
       {:error, reason} ->
-        GitHub.impl().set_label(project.repo, issue.number, @needs_human, true)
-        Pipeline.fail(issue, if(is_binary(reason), do: reason, else: inspect(reason)))
+        # An agent, the setup or a push failing after a cancellation is not a failure.
+        if Pipeline.stopped?(issue) do
+          {:ok, issue}
+        else
+          label_needs_human(issue, project)
+          Pipeline.fail(issue, if(is_binary(reason), do: reason, else: inspect(reason)))
+        end
     end
+  end
+
+  defp label_needs_human(issue, project) do
+    unless_stopped(issue, fn ->
+      GitHub.impl().set_label(project.repo, issue.number, @needs_human, true)
+    end)
   end
 
   ## Planning
@@ -89,15 +107,19 @@ defmodule Factory.Pipeline.Stages do
           plan_approved(issue, project)
 
         issue.plan_round >= issue.plan_round_limit ->
-          GitHub.post(project.repo, issue.number, """
-          **Plan review: changes still requested after #{issue.plan_round} round(s).** A person needs to decide.
+          post_then(
+            issue,
+            project.repo,
+            issue.number,
+            """
+            **Plan review: changes still requested after #{issue.plan_round} round(s).** A person needs to decide.
 
-          #{Prompts.findings(review)}
+            #{Prompts.findings(review)}
 
-          Reply `/factory approve` to allow one more revision round, or `/factory stop` to stop.
-          """)
-
-          Pipeline.hold(issue, "plan_rounds_exhausted", review["summary"], "planning")
+            Reply `/factory approve` to allow one more revision round, or `/factory stop` to stop.
+            """,
+            fn -> Pipeline.hold(issue, "plan_rounds_exhausted", review["summary"], "planning") end
+          )
 
         true ->
           Pipeline.transition(
@@ -122,6 +144,9 @@ defmodule Factory.Pipeline.Stages do
 
       context = %{
         review: issue.pr_number && changes_requested(issue, "pr_review"),
+        # What a maintainer asked for on the pull request, and what they asked before.
+        feedback: issue.pr_feedback,
+        decisions: issue.pr_decisions,
         gate_failure: nil,
         checks: for(c <- [commands.test, commands.lint], c, do: "- `#{c}`") |> Enum.join("\n")
       }
@@ -145,43 +170,56 @@ defmodule Factory.Pipeline.Stages do
       approved? = approved?(review)
       exhausted? = issue.pr_round >= issue.pr_round_limit
 
-      GitHub.post(project.repo, issue.pr_number, """
-      **Review round #{issue.pr_round}: #{if approved?, do: "approved", else: "changes requested"}**
+      post_then(
+        issue,
+        project.repo,
+        issue.pr_number,
+        """
+        **Review round #{issue.pr_round}: #{if approved?, do: "approved", else: "changes requested"}**
 
-      #{Prompts.findings(review)}
-      #{if not approved? and exhausted?, do: "\nThis was the last automatic round. Comment `/factory approve` to allow one more, or `/factory stop` to stop.", else: ""}
-      """)
-
-      cond do
-        approved? ->
-          GitHub.post(
-            project.repo,
-            issue.number,
-            "The pull request #{issue.pr_url} passed review and is ready for a person to merge."
-          )
-
-          Pipeline.transition(
-            issue,
-            "ready_to_merge",
-            %{},
-            "Approved in review round #{issue.pr_round}"
-          )
-
-        exhausted? ->
-          Pipeline.hold(issue, "pr_rounds_exhausted", review["summary"], "developing")
-
-        true ->
-          Pipeline.transition(
-            issue,
-            "developing",
-            %{},
-            "PR review round #{issue.pr_round}: changes requested"
-          )
-      end
+        #{Prompts.findings(review)}
+        #{if not approved? and exhausted?, do: "\nThis was the last automatic round. Comment `/factory approve` to allow one more, or `/factory stop` to stop.", else: ""}
+        """,
+        fn -> reviewed(issue, project, approved?, exhausted?, review) end
+      )
     end
   end
 
   defp step(state, _issue, _project), do: {:error, "no stage for state #{state}"}
+
+  defp reviewed(issue, project, true = _approved?, _exhausted?, _review) do
+    post_then(
+      issue,
+      project.repo,
+      issue.number,
+      "The pull request #{issue.pr_url} passed review and is ready for a person to merge.",
+      fn ->
+        # What a maintainer asked for is done: it stays as an agreed decision.
+        Pipeline.transition(
+          issue,
+          "ready_to_merge",
+          %{
+            pr_feedback: nil,
+            pr_decisions: Pipeline.join_feedback([issue.pr_decisions, issue.pr_feedback])
+          },
+          "Approved in review round #{issue.pr_round}"
+        )
+      end
+    )
+  end
+
+  defp reviewed(issue, _project, false, true = _exhausted?, review) do
+    Pipeline.hold(issue, "pr_rounds_exhausted", review["summary"], "developing")
+  end
+
+  defp reviewed(issue, _project, false, false, _review) do
+    Pipeline.transition(
+      issue,
+      "developing",
+      %{},
+      "PR review round #{issue.pr_round}: changes requested"
+    )
+  end
 
   ## Planning helpers
 
@@ -192,13 +230,15 @@ defmodule Factory.Pipeline.Stages do
     list = questions |> Enum.with_index(1) |> Enum.map_join("\n", fn {q, i} -> "#{i}. #{q}" end)
 
     with :ok <-
-           GitHub.post(project.repo, issue.number, """
-           **The Planner needs some answers before writing the plan:**
+           unless_stopped(issue, fn ->
+             GitHub.post(project.repo, issue.number, """
+             **The Planner needs some answers before writing the plan:**
 
-           #{list}
+             #{list}
 
-           Answer in a comment; planning continues once you do.
-           """) do
+             Answer in a comment; planning continues once you do.
+             """)
+           end) do
       Pipeline.transition(
         issue,
         "awaiting_answers",
@@ -214,8 +254,11 @@ defmodule Factory.Pipeline.Stages do
     with true <-
            ws.plan_ready?(path, issue) ||
              {:error, "the planner did not write spec.md, plan.md and tasks.md"},
-         :ok <- ws.commit(path, "Plan for ##{issue.number}", only: Workspace.plan_dir(issue)),
-         :ok <- ws.push(path, issue) do
+         :ok <-
+           unless_stopped(issue, fn ->
+             ws.commit(path, "Plan for ##{issue.number}", only: Workspace.plan_dir(issue))
+           end),
+         :ok <- unless_stopped(issue, fn -> ws.push(path, issue) end) do
       issue = Pipeline.update_issue(issue, %{difficulty: plan["difficulty"]})
 
       if issue.plan_round_limit == 0 do
@@ -240,21 +283,32 @@ defmodule Factory.Pipeline.Stages do
 
     {model, effort} = Project.model_for(project, {:developer, issue.difficulty})
 
-    GitHub.post(project.repo, issue.number, """
-    **Plan ready** — difficulty: **#{issue.difficulty}** (#{plan && plan.output["difficulty_reason"]})
+    post_then(
+      issue,
+      project.repo,
+      issue.number,
+      """
+      **Plan ready** — difficulty: **#{issue.difficulty}** (#{plan && plan.output["difficulty_reason"]})
 
-    #{plan && plan.summary}
+      #{plan && plan.summary}
 
-    Spec, plan and tasks: https://github.com/#{project.repo}/tree/#{issue.branch}/#{Workspace.plan_dir(issue)}
+      Spec, plan and tasks: https://github.com/#{project.repo}/tree/#{issue.branch}/#{Workspace.plan_dir(issue)}
 
-    #{if wait?, do: "Reply `/factory approve` to start development, or comment with what should change.", else: "Development starts now with #{model} (#{effort})."}
-    """)
-
-    if wait? do
-      Pipeline.transition(issue, "awaiting_plan_approval", %{}, "Plan approved by the Reviewer")
-    else
-      Pipeline.transition(issue, "developing", %{}, "Plan approved")
-    end
+      #{if wait?, do: "Reply `/factory approve` to start development, or comment with what should change.", else: "Development starts now with #{model} (#{effort})."}
+      """,
+      fn ->
+        if wait? do
+          Pipeline.transition(
+            issue,
+            "awaiting_plan_approval",
+            %{},
+            "Plan approved by the Reviewer"
+          )
+        else
+          Pipeline.transition(issue, "developing", %{}, "Plan approved")
+        end
+      end
+    )
   end
 
   ## Development helpers
@@ -282,15 +336,18 @@ defmodule Factory.Pipeline.Stages do
       if work["status"] == "blocked" do
         reason = work["blocked_reason"] || work["summary"]
 
-        GitHub.post(
+        post_then(
+          issue,
           project.repo,
           issue.number,
-          "**The Developer is blocked:** #{reason}\n\nReply `/factory approve` to try again once it is resolved."
+          "**The Developer is blocked:** #{reason}\n\nReply `/factory approve` to try again once it is resolved.",
+          fn -> Pipeline.hold(issue, "developer_blocked", reason, "developing") end
         )
-
-        Pipeline.hold(issue, "developer_blocked", reason, "developing")
       else
-        with :ok <- Workspace.impl().commit(path, "Work on ##{issue.number}", []) do
+        with :ok <-
+               unless_stopped(issue, fn ->
+                 Workspace.impl().commit(path, "Work on ##{issue.number}", [])
+               end) do
           gates(issue, project, path, context, attempt, work)
         end
       end
@@ -298,8 +355,13 @@ defmodule Factory.Pipeline.Stages do
   end
 
   defp gates(issue, project, path, context, attempt, work) do
-    run = Pipeline.start_run(issue, %{stage: "gates", role: "gates", round: attempt})
+    case Pipeline.authorize_run(issue, %{stage: "gates", role: "gates", round: attempt}) do
+      {:error, :stopped} -> {:stopped, issue}
+      {:ok, run} -> check(run, issue, project, path, context, attempt, work)
+    end
+  end
 
+  defp check(run, issue, project, path, context, attempt, work) do
     case Gates.impl().check(project, issue, path) do
       :ok ->
         Pipeline.finish_run(run, "ok", %{summary: "Tests and lint pass"})
@@ -311,13 +373,13 @@ defmodule Factory.Pipeline.Stages do
         if attempt < @max_attempts do
           develop(issue, project, path, %{context | gate_failure: output}, attempt + 1)
         else
-          GitHub.post(
+          post_then(
+            issue,
             project.repo,
             issue.number,
-            "**The checks still fail after #{attempt} attempts.** Reply `/factory approve` to try again.\n\n```\n#{Factory.Shell.tail(output, 3000)}\n```"
+            "**The checks still fail after #{attempt} attempts.** Reply `/factory approve` to try again.\n\n```\n#{Factory.Shell.tail(output, 3000)}\n```",
+            fn -> Pipeline.hold(issue, "gates_failed", output, "developing") end
           )
-
-          Pipeline.hold(issue, "gates_failed", output, "developing")
         end
     end
   end
@@ -335,14 +397,14 @@ defmodule Factory.Pipeline.Stages do
         )
 
       issue.pr_number ->
-        with :ok <- ws.push(path, issue) do
-          GitHub.post(
+        with :ok <- unless_stopped(issue, fn -> ws.push(path, issue) end) do
+          post_then(
+            issue,
             project.repo,
             issue.pr_number,
-            "**Changes pushed for review round #{issue.pr_round + 1}.**\n\n#{work["summary"]}"
+            "**Changes pushed for review round #{issue.pr_round + 1}.**\n\n#{work["summary"]}",
+            fn -> Pipeline.transition(issue, "pr_review", %{}, "Review changes pushed") end
           )
-
-          Pipeline.transition(issue, "pr_review", %{}, "Review changes pushed")
         end
 
       true ->
@@ -355,14 +417,16 @@ defmodule Factory.Pipeline.Stages do
           Closes ##{issue.number}
           """)
 
-        with :ok <- ws.push(path, issue),
+        with :ok <- unless_stopped(issue, fn -> ws.push(path, issue) end),
              {:ok, pr} <-
-               GitHub.impl().create_pr(project.repo, %{
-                 head: issue.branch,
-                 base: project.base_branch,
-                 title: issue.title,
-                 body: body
-               }) do
+               unless_stopped(issue, fn ->
+                 GitHub.impl().create_pr(project.repo, %{
+                   head: issue.branch,
+                   base: project.base_branch,
+                   title: issue.title,
+                   body: body
+                 })
+               end) do
           Pipeline.transition(
             issue,
             "pr_review",
@@ -380,6 +444,20 @@ defmodule Factory.Pipeline.Stages do
   defp escalate(_), do: "hard"
 
   ## Shared
+
+  # Runs an effect outside the factory, unless the issue was stopped just before.
+  defp unless_stopped(issue, fun) do
+    if Pipeline.stopped?(issue), do: {:stopped, issue}, else: fun.()
+  end
+
+  # Posts a comment and goes on with `next` whatever GitHub answered, as long as
+  # the issue was not stopped.
+  defp post_then(issue, repo, number, body, next) do
+    case unless_stopped(issue, fn -> GitHub.post(repo, number, body) end) do
+      {:stopped, _} = stopped -> stopped
+      _posted_or_not -> next.()
+    end
+  end
 
   defp open_issue(project, issue) do
     case GitHub.impl().get_issue(project.repo, issue.number) do

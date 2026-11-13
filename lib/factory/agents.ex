@@ -34,8 +34,13 @@ defmodule Factory.Agents do
 
   @doc """
   `tier` only matters for the developer: it is the difficulty whose model to use.
+
+  The agent only starts if `Pipeline.authorize_run/2` records its run before the
+  issue is stopped; and if the issue was stopped while it worked, its answer is
+  dropped. Either way the result is `{:stopped, issue}`.
   """
-  @spec run(Issue.t(), Project.t(), map()) :: {:ok, map()} | {:error, String.t()}
+  @spec run(Issue.t(), Project.t(), map()) ::
+          {:ok, map()} | {:error, String.t()} | {:stopped, Issue.t()}
   def run(
         %Issue{} = issue,
         %Project{} = project,
@@ -47,15 +52,6 @@ defmodule Factory.Agents do
         if(role == :developer, do: {:developer, spec[:tier] || issue.difficulty}, else: role)
       )
 
-    run =
-      Pipeline.start_run(issue, %{
-        stage: stage,
-        role: to_string(role),
-        round: round,
-        model: model,
-        effort: effort
-      })
-
     request = %{
       role: role,
       prompt: spec.prompt,
@@ -66,21 +62,33 @@ defmodule Factory.Agents do
       max_budget_usd: project.max_budget_usd
     }
 
-    case impl(model).run(request) do
-      {:ok, result} ->
-        Pipeline.finish_run(run, "ok", %{
-          output: result.output,
-          summary: result.output["summary"],
-          cost_usd: result[:cost_usd] && Decimal.from_float(result.cost_usd / 1),
-          input_tokens: result[:input_tokens],
-          output_tokens: result[:output_tokens]
-        })
+    attrs = %{stage: stage, role: to_string(role), round: round, model: model, effort: effort}
 
-        {:ok, result.output}
+    case Pipeline.authorize_run(issue, attrs) do
+      {:error, :stopped} ->
+        {:stopped, issue}
 
-      {:error, reason} ->
-        Pipeline.finish_run(run, "failed", %{summary: String.slice(reason, 0, 2000)})
-        {:error, "#{role} agent failed: #{reason}"}
+      {:ok, run} ->
+        result = impl(model).run(request)
+        answer = finish(run, role, result)
+        if Pipeline.stopped?(issue), do: {:stopped, issue}, else: answer
     end
+  end
+
+  defp finish(run, _role, {:ok, result}) do
+    Pipeline.finish_run(run, "ok", %{
+      output: result.output,
+      summary: result.output["summary"],
+      cost_usd: result[:cost_usd] && Decimal.from_float(result.cost_usd / 1),
+      input_tokens: result[:input_tokens],
+      output_tokens: result[:output_tokens]
+    })
+
+    {:ok, result.output}
+  end
+
+  defp finish(run, role, {:error, reason}) do
+    Pipeline.finish_run(run, "failed", %{summary: String.slice(reason, 0, 2000)})
+    {:error, "#{role} agent failed: #{reason}"}
   end
 end

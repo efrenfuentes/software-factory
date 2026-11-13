@@ -4,8 +4,9 @@ defmodule Factory.PipelineTest do
 
   alias Factory.Fakes
   alias Factory.Pipeline
-  alias Factory.Pipeline.{Issue, Poller, Stages}
+  alias Factory.Pipeline.{Issue, Poller, Stages, StageRun, Transition}
   alias Factory.Projects
+  alias Factory.Workers.{CommentWorker, StageWorker}
 
   @changes %{
     "verdict" => "changes_requested",
@@ -49,8 +50,10 @@ defmodule Factory.PipelineTest do
     end
   end
 
+  # Polls a little later than now: comments the fake dates a second ahead must
+  # fall before the pass's cut, which leaves a margin for clock skew.
   defp poll(issue) do
-    Poller.poll()
+    Poller.poll(now: DateTime.add(DateTime.utc_now(), 15))
     Pipeline.get_issue!(issue.id)
   end
 
@@ -68,6 +71,50 @@ defmodule Factory.PipelineTest do
   end
 
   defp runs(issue, stage), do: issue |> Pipeline.list_runs() |> Enum.filter(&(&1.stage == stage))
+
+  defp stage_jobs(issue, state) do
+    all_enqueued(worker: StageWorker, args: %{issue_id: issue.id, state: state})
+  end
+
+  defp comment_jobs, do: all_enqueued(worker: CommentWorker)
+
+  defp requests(role), do: Enum.filter(Fakes.Agent.requests(), &(&1.role == role))
+
+  defp prompts(role), do: Enum.map(requests(role), & &1.prompt)
+
+  defp cancel_now(issue), do: fn -> {:ok, _} = Pipeline.cancel(Pipeline.get_issue!(issue.id)) end
+
+  # What the factory did outside itself, to compare before and after a cancellation.
+  defp effects(issue) do
+    %{
+      posted: Fakes.GitHub.posted(),
+      commits: Fakes.Workspace.commits(),
+      pushes: Fakes.Workspace.pushes(),
+      requests: Fakes.Agent.requests(),
+      runs: Pipeline.list_runs(issue)
+    }
+  end
+
+  # From ready_to_merge, a round asked by a person that the Reviewer keeps rejecting.
+  defp exhausted_after(issue) do
+    Fakes.Agent.script(:reviewer, [@changes])
+    {:ok, issue} = Pipeline.request_pr_changes(issue, "more", "n")
+    drive(issue)
+  end
+
+  defp last_transition(issue), do: issue |> Pipeline.list_transitions() |> List.last()
+
+  # An issue whose pull request #100 passed review: `ready_to_merge`, round 1/3.
+  defp ready(project), do: project |> track() |> drive()
+
+  # An issue held after three pull request review rounds asked for "Fix X".
+  defp exhausted(project) do
+    Fakes.Agent.script(:reviewer, [@approve, @changes])
+    issue = project |> track() |> drive()
+    assert {issue.state, issue.hold_reason} == {"needs_human", "pr_rounds_exhausted"}
+    Fakes.Agent.script(:reviewer, [@approve])
+    issue
+  end
 
   test "takes an easy issue from the label to a merged pull request", %{project: project} do
     Fakes.State.put(:listed, [%{number: 7, title: "Add export", body: "Body", url: "u"}])
@@ -373,5 +420,377 @@ defmodule Factory.PipelineTest do
   test "reads commands only at the start of a line" do
     assert Poller.commands(%{body: "fine\n  /factory Approve now"}) == ["approve"]
     assert Poller.commands(%{body: "do not run /factory stop please"}) == []
+  end
+
+  test "only an open pull request waiting for a person accepts changes" do
+    accepts? = &Issue.accepts_pr_changes?(struct(Issue, &1))
+
+    assert accepts?.(%{state: "ready_to_merge", pr_number: 9})
+    assert accepts?.(%{state: "needs_human", hold_reason: "pr_rounds_exhausted", pr_number: 9})
+    refute accepts?.(%{state: "ready_to_merge", pr_number: nil})
+    refute accepts?.(%{state: "needs_human", hold_reason: "pr_rounds_exhausted", pr_number: nil})
+    refute accepts?.(%{state: "needs_human", hold_reason: "gates_failed", pr_number: 9})
+    refute accepts?.(%{state: "awaiting_plan_approval", pr_number: 9})
+  end
+
+  describe "requesting changes on the pull request" do
+    test "from ready to merge it adds a round and enqueues the Developer", %{project: project} do
+      issue = ready(project)
+      assert {issue.pr_round, issue.pr_round_limit} == {1, 3}
+      jobs = length(stage_jobs(issue, "developing"))
+
+      assert {:ok, issue} = Pipeline.request_pr_changes(issue, "Rename the CSV", "note")
+
+      assert {issue.state, issue.pr_round_limit, issue.pr_feedback} ==
+               {"developing", 4, "Rename the CSV"}
+
+      assert length(stage_jobs(issue, "developing")) == jobs + 1
+      assert last_transition(issue).note == "note"
+    end
+
+    test "after the rounds ran out it grants one past the current round", %{project: project} do
+      issue = exhausted(project)
+      issue = Pipeline.update_issue(issue, %{pr_feedback: "Earlier"})
+
+      assert {:ok, issue} = Pipeline.request_pr_changes(issue, "Ignore X, do Y", "note")
+      assert issue.state == "developing"
+      assert issue.pr_round_limit == issue.pr_round + 1
+      assert {issue.hold_reason, issue.hold_detail, issue.resume_state} == {nil, nil, nil}
+      assert issue.pr_feedback == "Earlier\n\n---\n\nIgnore X, do Y"
+    end
+
+    test "is refused while the issue is not waiting with its pull request", %{project: project} do
+      issue = track(project)
+      assert {:error, :not_accepting_pr_changes} = Pipeline.request_pr_changes(issue, "x", "n")
+    end
+
+    test "the same wait grants a single round, and never after a cancellation", %{
+      project: project
+    } do
+      issue = ready(project)
+      jobs = length(stage_jobs(issue, "developing"))
+
+      assert {:ok, _} = Pipeline.request_pr_changes(issue, "A", "n")
+      assert {:error, :not_accepting_pr_changes} = Pipeline.request_pr_changes(issue, "B", "n")
+      assert Enum.count(Pipeline.list_transitions(issue), &(&1.note == "n")) == 1
+      assert length(stage_jobs(issue, "developing")) == jobs + 1
+      assert Pipeline.get_issue!(issue.id).pr_feedback == "A"
+    end
+
+    test "is refused after a cancellation", %{project: project} do
+      issue = ready(project)
+      {:ok, _} = Pipeline.cancel(issue)
+      jobs = length(stage_jobs(issue, "developing"))
+
+      assert {:error, :not_accepting_pr_changes} = Pipeline.request_pr_changes(issue, "C", "n")
+      assert Pipeline.get_issue!(issue.id).state == "cancelled"
+      assert length(stage_jobs(issue, "developing")) == jobs
+    end
+
+    test "before_commit can refuse it, and nothing is written", %{project: project} do
+      issue = ready(project)
+      transitions = Pipeline.list_transitions(issue)
+      jobs = Repo.aggregate(Oban.Job, :count)
+      job = CommentWorker.new_comment(issue, 100, "hello")
+
+      assert {:error, :boom} =
+               Pipeline.request_pr_changes(issue, "x", "n",
+                 before_commit: fn _row -> {:error, :boom} end,
+                 jobs: [job]
+               )
+
+      assert Pipeline.get_issue!(issue.id) == issue
+      assert Pipeline.list_transitions(issue) == transitions
+      assert Repo.aggregate(Oban.Job, :count) == jobs
+
+      assert {:ok, _} =
+               Pipeline.request_pr_changes(issue, "x", "n",
+                 before_commit: fn row -> {:ok, row} end,
+                 jobs: [job]
+               )
+
+      assert [%{args: %{"number" => 100}}] = comment_jobs()
+    end
+
+    test "a decision on an issue that moved on is stale and writes nothing", %{
+      project: project
+    } do
+      issue = exhausted(project)
+      {:ok, moved} = Pipeline.mark_pr_comments_seen(issue, DateTime.utc_now())
+      guard = [unchanged_since: issue]
+
+      assert {:error, :stale} = Pipeline.request_pr_changes(issue, "x", "n", guard)
+      assert {:error, :stale} = Pipeline.approve(issue, "a person", guard)
+      assert {:error, :stale} = Pipeline.cancel(issue, "n", guard)
+      assert {:error, :stale} = Pipeline.mark_pr_comments_seen(issue, DateTime.utc_now())
+      assert Pipeline.get_issue!(issue.id).state == "needs_human"
+      assert Pipeline.get_issue!(issue.id).pr_comments_seen_at == moved.pr_comments_seen_at
+
+      # The wait itself changing makes it stale too.
+      Repo.update_all(from(i in Issue, where: i.id == ^issue.id),
+        set: [state_entered_at: DateTime.utc_now()]
+      )
+
+      assert {:error, :stale} =
+               Pipeline.request_pr_changes(moved, "x", "n", unchanged_since: moved)
+
+      assert {:error, :stale} = Pipeline.cancel(moved, "n", unchanged_since: moved)
+      assert Pipeline.get_issue!(issue.id).state == "needs_human"
+    end
+
+    test "the comments cursor never moves back", %{project: project} do
+      issue = ready(project)
+      later = DateTime.add(DateTime.utc_now(), 60)
+      {:ok, issue} = Pipeline.mark_pr_comments_seen(issue, later)
+      {:ok, issue} = Pipeline.mark_pr_comments_seen(issue, DateTime.utc_now())
+      assert issue.pr_comments_seen_at == later
+
+      {:ok, issue} =
+        Pipeline.request_pr_changes(issue, "x", "n",
+          unchanged_since: issue,
+          seen_until: DateTime.utc_now()
+        )
+
+      assert issue.pr_comments_seen_at == later
+    end
+
+    test "a stopped issue stays stopped whatever a stage writes late", %{project: project} do
+      issue = ready(project)
+      {:ok, developing} = Pipeline.request_pr_changes(issue, "x", "n")
+      {:ok, _} = Pipeline.cancel(developing)
+      transitions = Pipeline.list_transitions(issue)
+      jobs = Repo.aggregate(Oban.Job, :count)
+
+      assert {:ok, %{state: "cancelled"}} = Pipeline.transition(developing, "pr_review")
+
+      assert {:ok, %{state: "cancelled"}} =
+               Pipeline.hold(developing, "gates_failed", "boom", "developing")
+
+      assert {:ok, %{state: "cancelled"}} = Pipeline.fail(developing, "boom")
+
+      assert Pipeline.get_issue!(issue.id).state == "cancelled"
+      assert Pipeline.list_transitions(issue) == transitions
+      assert Repo.aggregate(Oban.Job, :count) == jobs
+    end
+
+    test "runs start only while the issue is not stopped", %{project: project} do
+      issue = ready(project)
+      {:ok, developing} = Pipeline.request_pr_changes(issue, "x", "n")
+      refute Pipeline.stopped?(developing)
+
+      assert {:ok, %StageRun{status: "running"}} =
+               Pipeline.authorize_run(developing, %{stage: "gates", role: "gates", round: 1})
+
+      runs = length(Pipeline.list_runs(issue))
+      {:ok, _} = Pipeline.cancel(developing)
+      assert Pipeline.stopped?(developing)
+
+      assert {:error, :stopped} =
+               Pipeline.authorize_run(developing, %{stage: "gates", role: "gates", round: 2})
+
+      assert length(Pipeline.list_runs(issue)) == runs
+    end
+
+    test "a merged issue is stopped too", %{project: project} do
+      issue = ready(project)
+      {:ok, done} = Pipeline.transition(issue, "done")
+      assert Pipeline.stopped?(done)
+    end
+
+    test "a hold records its reason, and other holds are not pull request waits", %{
+      project: project
+    } do
+      Fakes.Gates.script([{:error, "boom"}])
+      issue = project |> track() |> drive()
+
+      assert %Transition{state: "needs_human", hold_reason: "gates_failed"} =
+               last_transition(issue)
+
+      assert Pipeline.pr_waiting_periods(issue) == []
+    end
+
+    test "the pull request waits are listed, closed ones with their end", %{project: project} do
+      issue = ready(project)
+      {:ok, _} = Pipeline.request_pr_changes(issue, "x", "n")
+      issue = drive(issue)
+      assert issue.state == "ready_to_merge"
+
+      assert [{_, %DateTime{}}, {entered_at, nil}] = Pipeline.pr_waiting_periods(issue)
+      assert entered_at == issue.state_entered_at
+
+      issue = exhausted_after(issue)
+      assert %Transition{hold_reason: "pr_rounds_exhausted"} = last_transition(issue)
+      assert length(Pipeline.pr_waiting_periods(issue)) == 3
+    end
+
+    test "a resumed stage runs even while its previous job is still executing", %{
+      project: project
+    } do
+      Fakes.Gates.script([{:error, "boom"}])
+      issue = project |> track() |> drive()
+      assert issue.state == "needs_human"
+
+      Repo.update_all(Oban.Job, set: [state: "completed"])
+
+      job =
+        Repo.one!(
+          from j in Oban.Job,
+            where: j.worker == "Factory.Workers.StageWorker",
+            where: fragment("?->>'state' = 'developing'", j.args),
+            order_by: [desc: j.id],
+            limit: 1
+        )
+
+      Repo.update_all(from(j in Oban.Job, where: j.id == ^job.id), set: [state: "executing"])
+
+      Fakes.Gates.script([:ok])
+      developers = length(requests(:developer))
+      {:ok, _} = Pipeline.approve(issue)
+
+      assert %{success: 1} = Oban.drain_queue(queue: :agents)
+      assert length(requests(:developer)) == developers + 1
+    end
+  end
+
+  describe "cancelling while a stage runs" do
+    # The issue in the state whose stage a test cancels, run up to it.
+    defp reach(project, "planning"), do: track(project)
+
+    defp reach(project, "plan_review") do
+      {:ok, issue} = project |> track() |> Stages.run()
+      assert issue.state == "plan_review"
+      issue
+    end
+
+    defp reach(project, "developing") do
+      {:ok, issue} = project |> ready() |> Pipeline.request_pr_changes("Rename the CSV", "n")
+      issue
+    end
+
+    defp reach(project, "pr_review") do
+      {:ok, issue} = project |> reach("developing") |> Stages.run()
+      assert issue.state == "pr_review"
+      issue
+    end
+
+    defp assert_stays_cancelled(issue) do
+      assert Pipeline.get_issue!(issue.id).state == "cancelled"
+      assert last_transition(issue).state == "cancelled"
+      refute Stages.needs_human_label() in Fakes.GitHub.labels(7)
+    end
+
+    test "a stage whose job starts after the cancellation runs nothing", %{project: project} do
+      snapshot = reach(project, "developing") |> then(&Pipeline.get_issue!(&1.id))
+      {:ok, _} = Pipeline.cancel(snapshot)
+      before = effects(snapshot)
+
+      assert {:ok, _} = Stages.run(snapshot)
+      assert effects(snapshot) == before
+      assert_stays_cancelled(snapshot)
+    end
+
+    for {state, role, absent} <- [
+          {"planning", :planner, []},
+          {"plan_review", :reviewer, ["Plan ready"]},
+          {"developing", :developer, ["Changes pushed"]},
+          {"pr_review", :reviewer, ["Review round", "passed review"]}
+        ] do
+      test "cancelling while the #{role} works in #{state} stops everything after it", %{
+        project: project
+      } do
+        issue = reach(project, unquote(state))
+        Fakes.Agent.script(:reviewer, [@approve])
+        before = effects(issue)
+        Fakes.Agent.during(unquote(role), cancel_now(issue))
+
+        assert {:ok, _} = Stages.run(Pipeline.get_issue!(issue.id))
+        after_ = effects(issue)
+
+        assert length(after_.requests) == length(before.requests) + 1
+        assert List.last(after_.requests).role == unquote(role)
+        assert after_.posted == before.posted
+        assert after_.commits == before.commits
+        assert after_.pushes == before.pushes
+
+        for {_, body} <- after_.posted -- before.posted,
+            text <- unquote(absent),
+            do: refute(body =~ text)
+
+        refute Enum.any?(
+                 Pipeline.list_transitions(issue),
+                 &(&1.state == "ready_to_merge" and is_nil(&1.left_at))
+               )
+
+        assert_stays_cancelled(issue)
+      end
+    end
+
+    for {name, answer} <- [
+          {"blocked", %{"status" => "blocked", "summary" => "No", "blocked_reason" => "Keys"}},
+          {"failing", {:error, "boom"}}
+        ] do
+      test "a #{name} Developer after the cancellation is neither reported nor failed", %{
+        project: project
+      } do
+        issue = reach(project, "developing")
+        Fakes.Agent.script(:developer, [unquote(Macro.escape(answer))])
+        before = effects(issue)
+        Fakes.Agent.during(:developer, cancel_now(issue))
+
+        assert {:ok, _} = Stages.run(Pipeline.get_issue!(issue.id))
+        assert effects(issue).posted == before.posted
+
+        refute Enum.any?(
+                 Pipeline.list_transitions(issue),
+                 &(&1.state in ~w(failed needs_human) and &1.entered_at > issue.state_entered_at)
+               )
+
+        assert_stays_cancelled(issue)
+      end
+    end
+
+    test "cancelling during the last failing check stops for no one", %{project: project} do
+      issue = reach(project, "developing")
+      Fakes.Gates.script([{:error, "x"}, {:error, "x"}, {:error, "x"}])
+      before = effects(issue)
+      Fakes.Gates.during(3, cancel_now(issue))
+
+      assert {:ok, _} = Stages.run(Pipeline.get_issue!(issue.id))
+      refute Enum.any?(Fakes.GitHub.posted(), fn {_, body} -> body =~ "checks still fail" end)
+      assert effects(issue).posted == before.posted
+
+      assert length(requests(:developer)) ==
+               length(Enum.filter(before.requests, &(&1.role == :developer))) + 3
+
+      assert_stays_cancelled(issue)
+    end
+
+    test "cancelling during the first check starts no other attempt", %{project: project} do
+      issue = reach(project, "developing")
+      Fakes.Gates.script([{:error, "x"}])
+      developers = length(requests(:developer))
+      Fakes.Gates.during(1, cancel_now(issue))
+
+      assert {:ok, _} = Stages.run(Pipeline.get_issue!(issue.id))
+      assert length(requests(:developer)) == developers + 1
+      assert length(runs(issue, "gates")) == 2
+
+      assert [%{round: 1}] =
+               issue |> runs("gates") |> Enum.filter(&(&1.started_at > issue.state_entered_at))
+
+      assert_stays_cancelled(issue)
+    end
+
+    test "the status label is not put back on an issue cancelled meanwhile", %{project: project} do
+      {:ok, issue} = project |> track() |> Stages.run()
+      {:ok, issue} = Stages.run(issue)
+      assert issue.state == "developing"
+
+      Fakes.GitHub.during({:set_label, "factory:in-progress", false}, 7, cancel_now(issue))
+      assert {:ok, _} = Stages.run(issue)
+
+      refute "factory:in-review" in Fakes.GitHub.labels(7)
+      assert_stays_cancelled(issue)
+    end
   end
 end
