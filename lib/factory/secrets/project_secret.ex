@@ -27,11 +27,13 @@ defmodule Factory.Secrets.ProjectSecret do
 
   @doc """
   A new secret: name, value and whether only the checks get it. `checks_only`
-  may be left out (false), but not given as nil or as anything but a boolean.
+  may be left out (false), but not given as nil, as blank text or as anything
+  but a boolean.
   """
   def create_changeset(secret, attrs) do
     secret
-    |> cast(attrs, [:name, :value, :checks_only])
+    |> cast(attrs, [:name, :value])
+    |> cast_checks_only(attrs)
     |> update_change(:name, &String.trim/1)
     |> normalize_value()
     |> validate_required([:name, :value, :checks_only])
@@ -46,11 +48,18 @@ defmodule Factory.Secrets.ProjectSecret do
   @doc "A new value and/or `checks_only` for an existing secret. An empty value keeps the old one."
   def replace_changeset(secret, attrs) do
     secret
-    |> cast(attrs, [:value, :checks_only])
+    |> cast(attrs, [:value])
+    |> cast_checks_only(attrs)
     |> validate_required([:checks_only])
     |> normalize_value()
     |> validate_value()
   end
+
+  # `cast/3` turns "" and blank text into the field's default (false), which would
+  # silently lift a `checks_only` restriction: here nothing counts as empty, so
+  # blank text is a cast error ("is invalid") and nil fails `validate_required`.
+  defp cast_checks_only(changeset, attrs),
+    do: cast(changeset, attrs, [:checks_only], empty_values: [])
 
   # `\r\n` becomes `\n`; a one-line value loses the blanks around it, a multiline one is kept.
   defp normalize_value(changeset) do

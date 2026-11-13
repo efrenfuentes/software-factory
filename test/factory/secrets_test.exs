@@ -98,16 +98,19 @@ defmodule Factory.SecretsTest do
       assert create_errors(%{}) == %{}
       assert create_errors(%{"checks_only" => "true"}) == %{}
 
-      for bad <- [nil, "maybe", %{"a" => "b"}, ["true"]] do
+      for bad <- [nil, "", " ", " \t\n", "maybe", %{"a" => "b"}, ["true"]] do
         assert %{checks_only: [_]} = create_errors(%{"checks_only" => bad}), inspect(bad)
 
-        replace =
-          ProjectSecret.replace_changeset(%ProjectSecret{checks_only: false}, %{
-            "value" => @value,
-            "checks_only" => bad
-          })
+        for previous <- [false, true], value <- [@value, ""] do
+          replace =
+            ProjectSecret.replace_changeset(%ProjectSecret{checks_only: previous}, %{
+              "value" => value,
+              "checks_only" => bad
+            })
 
-        assert %{checks_only: [_]} = errors_on(replace), inspect(bad)
+          refute replace.valid?, inspect({bad, previous, value})
+          assert %{checks_only: [_]} = errors_on(replace), inspect({bad, previous, value})
+        end
       end
 
       replace = ProjectSecret.replace_changeset(%ProjectSecret{checks_only: true}, %{})
