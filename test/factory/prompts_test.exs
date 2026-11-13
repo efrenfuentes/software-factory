@@ -3,7 +3,7 @@ defmodule Factory.Agents.PromptsTest do
   alias Factory.Agents.Prompts
   alias Factory.Pipeline.Issue
 
-  @issue %Issue{number: 7, title: "Add export"}
+  @issue %Issue{number: 7, title: "Add export", branch: "factory/issue-7"}
   @context %{review: nil, gate_failure: nil, checks: "- `mix test`"}
   @review %{"summary" => "Not yet", "blocking" => ["Fix X"], "minor" => []}
 
@@ -52,5 +52,51 @@ defmodule Factory.Agents.PromptsTest do
              "part of the agreed scope; never call\nwork that implements them out of scope"
 
     refute Prompts.pr_reviewer(@issue, "main") =~ "<comments>"
+  end
+
+  describe "the project's secrets" do
+    test "without secrets the Developer's prompt does not change" do
+      prompt = Prompts.developer(@issue, @context)
+
+      assert Prompts.developer(
+               @issue,
+               Map.merge(@context, %{
+                 secrets: %{available: [], checks_only: []},
+                 leaked_secrets: [],
+                 base_branch: "main"
+               })
+             ) == prompt
+
+      refute prompt =~ "secret"
+    end
+
+    test "the Developer is told the names it has and those only the checks get" do
+      prompt =
+        Prompts.developer(
+          @issue,
+          Map.put(@context, :secrets, %{available: ["API_KEY"], checks_only: ["CHECK_ONLY"]})
+        )
+
+      assert prompt =~ "Available to you and to the checks: `API_KEY`"
+
+      assert prompt =~
+               "Only for the checks the factory runs after you (you do not have them): `CHECK_ONLY`"
+
+      assert prompt =~ "never\nwrite them into files, commit messages or your answer"
+      refute prompt =~ "refused to push"
+    end
+
+    test "values left in the unpushed commits are to be removed from those commits only" do
+      prompt =
+        Prompts.developer(
+          @issue,
+          Map.merge(@context, %{leaked_secrets: ["API_KEY"], base_branch: "main"})
+        )
+
+      assert prompt =~ "refused to push"
+      assert prompt =~ "`API_KEY`"
+      assert prompt =~ "`origin/factory/issue-7` nor `origin/main`"
+      assert prompt =~ "Never change commits that were already pushed"
+    end
   end
 end

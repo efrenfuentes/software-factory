@@ -11,8 +11,13 @@ defmodule Factory.Pipeline.Stages do
   effect outside the factory — a comment, the `needs_human` label, a commit, a
   push, a pull request — goes through `unless_stopped/2`, so nothing more
   happens once the issue is cancelled.
+
+  The project's secrets are loaded once per stage, before anything starts; a
+  project whose secrets cannot be decrypted fails without running anything.
+  Every text the stage stores or publishes has their values replaced, and no
+  push goes out while the commits it would send contain one.
   """
-  alias Factory.{Agents, Gates, GitHub, Pipeline, Stacks, Workspace}
+  alias Factory.{Agents, Gates, GitHub, Pipeline, Secrets, Stacks, Workspace}
   alias Factory.Agents.Prompts
   alias Factory.Pipeline.Issue
   alias Factory.Projects.Project
@@ -27,6 +32,24 @@ defmodule Factory.Pipeline.Stages do
   def run(%Issue{} = issue) do
     issue = Factory.Repo.preload(issue, :project)
     project = issue.project
+
+    # Nothing starts — no agent, check, git command or run — without the secrets.
+    case Secrets.load(project) do
+      {:ok, bundle} ->
+        Secrets.Current.put(bundle)
+
+        try do
+          run_stage(issue, %{project | secrets: bundle})
+        after
+          Secrets.Current.delete()
+        end
+
+      {:error, reason} ->
+        outcome(issue, project, {:error, reason})
+    end
+  end
+
+  defp run_stage(issue, project) do
     GitHub.impl().set_label(project.repo, issue.number, @needs_human, false)
 
     result =
@@ -36,6 +59,10 @@ defmodule Factory.Pipeline.Stages do
         exception -> {:error, Exception.format(:error, exception, __STACKTRACE__)}
       end
 
+    outcome(issue, project, result)
+  end
+
+  defp outcome(issue, project, result) do
     case result do
       {:stopped, %Issue{} = issue} ->
         {:ok, issue}
@@ -50,7 +77,8 @@ defmodule Factory.Pipeline.Stages do
           {:ok, issue}
         else
           label_needs_human(issue, project)
-          Pipeline.fail(issue, if(is_binary(reason), do: reason, else: inspect(reason)))
+          detail = if is_binary(reason), do: reason, else: inspect(reason)
+          Pipeline.fail(issue, Secrets.redact(project.secrets, detail))
         end
     end
   end
@@ -109,7 +137,7 @@ defmodule Factory.Pipeline.Stages do
         issue.plan_round >= issue.plan_round_limit ->
           post_then(
             issue,
-            project.repo,
+            project,
             issue.number,
             """
             **Plan review: changes still requested after #{issue.plan_round} round(s).** A person needs to decide.
@@ -118,7 +146,7 @@ defmodule Factory.Pipeline.Stages do
 
             Reply `/factory approve` to allow one more revision round, or `/factory stop` to stop.
             """,
-            fn -> Pipeline.hold(issue, "plan_rounds_exhausted", review["summary"], "planning") end
+            fn -> hold(issue, project, "plan_rounds_exhausted", review["summary"], "planning") end
           )
 
         true ->
@@ -148,7 +176,16 @@ defmodule Factory.Pipeline.Stages do
         feedback: issue.pr_feedback,
         decisions: issue.pr_decisions,
         gate_failure: nil,
-        checks: for(c <- [commands.test, commands.lint], c, do: "- `#{c}`") |> Enum.join("\n")
+        checks: for(c <- [commands.test, commands.lint], c, do: "- `#{c}`") |> Enum.join("\n"),
+        secrets: Secrets.prompt_names(project.secrets),
+        # Values left in the commits not pushed yet, e.g. after a push was refused for them;
+        # if they cannot be read, the push asks again and fails.
+        leaked_secrets:
+          case leaked_secrets(issue, project, path) do
+            {:ok, names} -> names
+            {:error, _} -> []
+          end,
+        base_branch: project.base_branch
       }
 
       develop(issue, project, path, context, 1)
@@ -172,7 +209,7 @@ defmodule Factory.Pipeline.Stages do
 
       post_then(
         issue,
-        project.repo,
+        project,
         issue.pr_number,
         """
         **Review round #{issue.pr_round}: #{if approved?, do: "approved", else: "changes requested"}**
@@ -190,7 +227,7 @@ defmodule Factory.Pipeline.Stages do
   defp reviewed(issue, project, true = _approved?, _exhausted?, _review) do
     post_then(
       issue,
-      project.repo,
+      project,
       issue.number,
       "The pull request #{issue.pr_url} passed review and is ready for a person to merge.",
       fn ->
@@ -208,8 +245,8 @@ defmodule Factory.Pipeline.Stages do
     )
   end
 
-  defp reviewed(issue, _project, false, true = _exhausted?, review) do
-    Pipeline.hold(issue, "pr_rounds_exhausted", review["summary"], "developing")
+  defp reviewed(issue, project, false, true = _exhausted?, review) do
+    hold(issue, project, "pr_rounds_exhausted", review["summary"], "developing")
   end
 
   defp reviewed(issue, _project, false, false, _review) do
@@ -231,13 +268,17 @@ defmodule Factory.Pipeline.Stages do
 
     with :ok <-
            unless_stopped(issue, fn ->
-             GitHub.post(project.repo, issue.number, """
-             **The Planner needs some answers before writing the plan:**
+             GitHub.post(
+               project.repo,
+               issue.number,
+               Secrets.redact(project.secrets, """
+               **The Planner needs some answers before writing the plan:**
 
-             #{list}
+               #{list}
 
-             Answer in a comment; planning continues once you do.
-             """)
+               Answer in a comment; planning continues once you do.
+               """)
+             )
            end) do
       Pipeline.transition(
         issue,
@@ -258,7 +299,7 @@ defmodule Factory.Pipeline.Stages do
            unless_stopped(issue, fn ->
              ws.commit(path, "Plan for ##{issue.number}", only: Workspace.plan_dir(issue))
            end),
-         :ok <- unless_stopped(issue, fn -> ws.push(path, issue) end) do
+         :ok <- push(issue, project, path) do
       issue = Pipeline.update_issue(issue, %{difficulty: plan["difficulty"]})
 
       if issue.plan_round_limit == 0 do
@@ -285,7 +326,7 @@ defmodule Factory.Pipeline.Stages do
 
     post_then(
       issue,
-      project.repo,
+      project,
       issue.number,
       """
       **Plan ready** — difficulty: **#{issue.difficulty}** (#{plan && plan.output["difficulty_reason"]})
@@ -313,9 +354,23 @@ defmodule Factory.Pipeline.Stages do
 
   ## Development helpers
 
+  # The setup gets the secrets, so it only starts once its run is recorded.
   defp setup(project, issue, path) do
-    with {:error, output} <- Gates.impl().setup(project, issue, path) do
-      {:error, "Setup failed. #{output}"}
+    case Pipeline.authorize_run(issue, %{stage: "setup", role: "setup", round: issue.pr_round}) do
+      {:error, :stopped} ->
+        {:stopped, issue}
+
+      {:ok, run} ->
+        case Gates.impl().setup(project, issue, path) do
+          :ok ->
+            Pipeline.finish_run(run, "ok", %{summary: "Setup done"})
+            :ok
+
+          {:error, output} ->
+            output = Secrets.redact(project.secrets, output)
+            Pipeline.finish_run(run, "failed", %{summary: output})
+            {:error, "Setup failed. #{output}"}
+        end
     end
   end
 
@@ -338,10 +393,10 @@ defmodule Factory.Pipeline.Stages do
 
         post_then(
           issue,
-          project.repo,
+          project,
           issue.number,
           "**The Developer is blocked:** #{reason}\n\nReply `/factory approve` to try again once it is resolved.",
-          fn -> Pipeline.hold(issue, "developer_blocked", reason, "developing") end
+          fn -> hold(issue, project, "developer_blocked", reason, "developing") end
         )
       else
         with :ok <-
@@ -368,6 +423,7 @@ defmodule Factory.Pipeline.Stages do
         deliver(issue, project, path, work)
 
       {:error, output} ->
+        output = Secrets.redact(project.secrets, output)
         Pipeline.finish_run(run, "failed", %{summary: output})
 
         if attempt < @max_attempts do
@@ -375,10 +431,10 @@ defmodule Factory.Pipeline.Stages do
         else
           post_then(
             issue,
-            project.repo,
+            project,
             issue.number,
             "**The checks still fail after #{attempt} attempts.** Reply `/factory approve` to try again.\n\n```\n#{Factory.Shell.tail(output, 3000)}\n```",
-            fn -> Pipeline.hold(issue, "gates_failed", output, "developing") end
+            fn -> hold(issue, project, "gates_failed", output, "developing") end
           )
         end
     end
@@ -389,18 +445,19 @@ defmodule Factory.Pipeline.Stages do
 
     cond do
       not ws.code_changed?(path, project) ->
-        Pipeline.hold(
+        hold(
           issue,
+          project,
           "no_changes",
           "The Developer finished without changing any code.",
           "developing"
         )
 
       issue.pr_number ->
-        with :ok <- unless_stopped(issue, fn -> ws.push(path, issue) end) do
+        with :ok <- push(issue, project, path) do
           post_then(
             issue,
-            project.repo,
+            project,
             issue.pr_number,
             "**Changes pushed for review round #{issue.pr_round + 1}.**\n\n#{work["summary"]}",
             fn -> Pipeline.transition(issue, "pr_review", %{}, "Review changes pushed") end
@@ -409,15 +466,17 @@ defmodule Factory.Pipeline.Stages do
 
       true ->
         body =
-          GitHub.sign("""
-          #{work["summary"]}
+          GitHub.sign(
+            Secrets.redact(project.secrets, """
+            #{work["summary"]}
 
-          Spec, plan and tasks are in `#{Workspace.plan_dir(issue)}/`.
+            Spec, plan and tasks are in `#{Workspace.plan_dir(issue)}/`.
 
-          Closes ##{issue.number}
-          """)
+            Closes ##{issue.number}
+            """)
+          )
 
-        with :ok <- unless_stopped(issue, fn -> ws.push(path, issue) end),
+        with :ok <- push(issue, project, path),
              {:ok, pr} <-
                unless_stopped(issue, fn ->
                  GitHub.impl().create_pr(project.repo, %{
@@ -437,6 +496,54 @@ defmodule Factory.Pipeline.Stages do
     end
   end
 
+  # Pushes, unless the commits the push would send contain a secret value: then
+  # nothing is pushed and the issue waits for a person. If what would be sent
+  # cannot be read, nothing is pushed either and the stage fails.
+  defp push(issue, project, path) do
+    ws = Workspace.impl()
+
+    with {:ok, []} <- leaked_secrets(issue, project, path) do
+      unless_stopped(issue, fn -> ws.push(path, issue) end)
+    else
+      {:ok, names} ->
+        list = Enum.map_join(names, ", ", &"`#{&1}`")
+
+        post_then(
+          issue,
+          project,
+          issue.number,
+          """
+          **Nothing was pushed: the commits contain the value of the project secret(s) #{list}.**
+
+          Reply `/factory approve` to continue; the Developer is asked to remove the values from the commits that are not pushed yet.
+          """,
+          fn ->
+            hold(
+              issue,
+              project,
+              "secret_in_diff",
+              "The commits to push contain the value of the secret(s) #{Enum.join(names, ", ")}",
+              issue.state
+            )
+          end
+        )
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  # The secrets whose values are in the commits not pushed yet.
+  defp leaked_secrets(issue, project, path) do
+    if Secrets.any?(project.secrets) do
+      with {:ok, blocks} <- Workspace.impl().unpushed_changes(path, project, issue) do
+        {:ok, Secrets.leaked(project.secrets, blocks)}
+      end
+    else
+      {:ok, []}
+    end
+  end
+
   # An approval that still lists blocking problems is not one.
   defp approved?(review), do: review["verdict"] == "approve" and review["blocking"] in [nil, []]
 
@@ -452,11 +559,18 @@ defmodule Factory.Pipeline.Stages do
 
   # Posts a comment and goes on with `next` whatever GitHub answered, as long as
   # the issue was not stopped.
-  defp post_then(issue, repo, number, body, next) do
-    case unless_stopped(issue, fn -> GitHub.post(repo, number, body) end) do
+  defp post_then(issue, project, number, body, next) do
+    body = Secrets.redact(project.secrets, body)
+
+    case unless_stopped(issue, fn -> GitHub.post(project.repo, number, body) end) do
       {:stopped, _} = stopped -> stopped
       _posted_or_not -> next.()
     end
+  end
+
+  # Parks the issue with a detail that shows no secret value.
+  defp hold(issue, project, reason, detail, resume) do
+    Pipeline.hold(issue, reason, Secrets.redact(project.secrets, detail), resume)
   end
 
   defp open_issue(project, issue) do

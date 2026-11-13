@@ -166,7 +166,7 @@ defmodule Factory.Agents.Prompts do
     You are the Developer for issue ##{issue.number}: #{issue.title}
 
     #{task}
-    #{decisions(context[:decisions])}#{gate_failure(context[:gate_failure])}
+    #{leaked_secrets(context[:leaked_secrets], issue, context[:base_branch])}#{decisions(context[:decisions])}#{gate_failure(context[:gate_failure])}#{secrets(context[:secrets])}
     Follow the repository's conventions (read its CLAUDE.md, AGENTS.md or README if present).
     Write or update tests for what you change and run them. Keep the change limited to what
     #{if context[:feedback] || context[:decisions], do: "the plan and the maintainer's decisions ask", else: "the plan asks"} for. Commit your work with clear messages; do not push.
@@ -241,6 +241,34 @@ defmodule Factory.Agents.Prompts do
     </review>
     """
   end
+
+  defp secrets(%{available: available, checks_only: checks_only})
+       when available != [] or checks_only != [] do
+    """
+
+    The project has secrets, set as environment variables. Their values are secret: never
+    write them into files, commit messages or your answer, and do not print them.
+    #{names_line("Available to you and to the checks", available)}#{names_line("Only for the checks the factory runs after you (you do not have them)", checks_only)}
+    """
+  end
+
+  defp secrets(_), do: ""
+
+  defp names_line(_label, []), do: ""
+  defp names_line(label, names), do: "- #{label}: #{Enum.map_join(names, ", ", &"`#{&1}`")}\n"
+
+  defp leaked_secrets(names, issue, base) when is_list(names) and names != [] do
+    """
+
+    The factory refused to push: the commits that are not pushed yet contain the value of
+    the secret(s) #{Enum.map_join(names, ", ", &"`#{&1}`")}. Before anything else, rewrite
+    only those commits (the ones in neither `origin/#{issue.branch}` nor `origin/#{base}`) so
+    that none of them adds the value, for example by resetting softly to the last pushed
+    commit and committing again without it. Never change commits that were already pushed.
+    """
+  end
+
+  defp leaked_secrets(_names, _issue, _base), do: ""
 
   defp decisions(nil), do: ""
 

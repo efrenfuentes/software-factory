@@ -12,6 +12,13 @@ defmodule Factory.Workspace do
               :ok | {:error, String.t()}
   @callback code_changed?(path :: String.t(), Project.t()) :: boolean()
   @callback push(path :: String.t(), Issue.t()) :: :ok | {:error, String.t()}
+  @doc """
+  What a push would send, as blocks of text to search for secret values: the
+  message of each commit not pushed yet, and each run of consecutive added lines
+  of one hunk. It fails when that cannot be read reliably.
+  """
+  @callback unpushed_changes(path :: String.t(), Project.t(), Issue.t()) ::
+              {:ok, [String.t()]} | {:error, String.t()}
   @callback cleanup(Project.t(), Issue.t()) :: :ok
   @callback read_plan(Project.t(), Issue.t()) :: [%{name: String.t(), content: String.t()}]
 

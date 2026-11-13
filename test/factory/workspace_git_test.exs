@@ -3,6 +3,8 @@ defmodule Factory.Workspace.GitTest do
 
   alias Factory.Pipeline.Issue
   alias Factory.Projects.Project
+  alias Factory.Secrets
+  alias Factory.Secrets.{Bundle, Current}
   alias Factory.Workspace.Git
 
   @project %Project{repo: "acme/app", base_branch: "main"}
@@ -30,7 +32,7 @@ defmodule Factory.Workspace.GitTest do
       File.rm_rf!(home)
     end)
 
-    %{origin: origin}
+    %{origin: origin, clone: clone}
   end
 
   defp git!(dir, args) do
@@ -79,5 +81,241 @@ defmodule Factory.Workspace.GitTest do
     assert Git.read_plan(%Project{repo: "acme/never-cloned"}, @issue) == []
     assert {:ok, ^path} = Git.prepare(@project, @issue)
     assert File.exists?(Path.join(path, "lib.ex"))
+  end
+
+  describe "added_blocks/1" do
+    test "only added lines of hunks are content, in runs of consecutive lines" do
+      patch = """
+      factory-commit
+      diff --git a/f b/f
+      --- a/f
+      +++ b/f
+      @@ -1,2 +1,4 @@
+      ++x
+      +abcd\r
+      +efgh
+       context
+      +after
+      -removed
+      +again
+      @@ -9 +9 @@
+      +next
+      \\ No newline at end of file
+      +last
+      diff --git a/g b/g
+      +++ b/g
+      @@ -1 +1 @@
+      +other
+      factory-commit
+      @@ -1 +1 @@
+      +commit2
+      """
+
+      assert Git.added_blocks(patch) == [
+               "+x\nabcd\nefgh\n",
+               "after\n",
+               "again\n",
+               "next\n",
+               "last\n",
+               "other\n",
+               "commit2\n"
+             ]
+    end
+
+    test "an empty line inside a hunk is blank context, and the hunk goes on" do
+      patch = "factory-commit\n@@ -1,3 +1,4 @@\n a\n\n+x\n b\n"
+      assert Git.added_blocks(patch) == ["x\n"]
+    end
+
+    test "headers never count, and separated runs never join" do
+      patch = "factory-commit\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+abcd\n@@ -5 +5 @@\n+efgh\n"
+      assert Git.added_blocks(patch) == ["abcd\n", "efgh\n"]
+    end
+  end
+
+  describe "unpushed_changes/3" do
+    setup %{clone: clone} do
+      {:ok, path} = Git.prepare(@project, @issue)
+      on_exit(fn -> Current.delete() end)
+      %{path: path, clone: clone}
+    end
+
+    defp commit!(dir, file, content, message) do
+      File.mkdir_p!(Path.dirname(Path.join(dir, file)))
+      File.write!(Path.join(dir, file), content)
+      git!(dir, ~w(add -A))
+      git!(dir, ["commit", "--quiet", "-m", message])
+    end
+
+    defp bundle(pairs) do
+      Bundle.new(for {name, value} <- pairs, do: %{name: name, value: value, checks_only: false})
+    end
+
+    defp blocks(path) do
+      assert {:ok, blocks} = Git.unpushed_changes(path, @project, @issue)
+      blocks
+    end
+
+    defp in_some?(blocks, text), do: Enum.any?(blocks, &String.contains?(&1, text))
+
+    # Pushes a commit to origin/main from the factory's clone, and fetches it.
+    defp push_to_main!(clone, path, file, content) do
+      git!(clone, ~w(checkout --quiet main))
+      git!(clone, ~w(pull --quiet origin main))
+      commit!(clone, file, content, "main: #{file}")
+      git!(clone, ~w(push --quiet origin HEAD:main))
+      git!(path, ~w(fetch --quiet origin))
+    end
+
+    test "normal commits without secrets pass, and nothing is left once pushed", %{path: path} do
+      commit!(path, "lib.ex", "code\n", "Work on #7")
+      git!(path, ~w(commit --quiet --allow-empty -m empty))
+
+      blocks = blocks(path)
+      assert "code\n" in blocks
+      assert Secrets.leaked(bundle([{"API_KEY", "not-there-123"}]), blocks) == []
+
+      assert :ok = Git.push(path, @issue)
+      assert blocks(path) == []
+    end
+
+    test "a value added and removed, and one in a message, are found", %{path: path} do
+      commit!(path, "a.txt", "X-added-value-1\n", "add")
+      commit!(path, "a.txt", "clean\n", "remove")
+      git!(path, ["commit", "--quiet", "--allow-empty", "-m", "uses Y-message-value-2"])
+
+      blocks = blocks(path)
+      assert in_some?(blocks, "X-added-value-1")
+      assert in_some?(blocks, "Y-message-value-2")
+    end
+
+    test "a removed line or one already in the base is not", %{path: path, clone: clone} do
+      push_to_main!(clone, path, "z.txt", "keep\nZ-removed-value-3\n")
+      git!(path, ~w(merge --quiet --ff-only origin/main))
+      commit!(path, "z.txt", "keep\n", "remove Z")
+
+      refute in_some?(blocks(path), "Z-removed-value-3")
+    end
+
+    test "a multiline value is found whole only in consecutive added lines", %{path: path} do
+      secret = bundle([{"SHORT_LINES", "abcd\nefgh"}])
+
+      commit!(path, "m.txt", "abcd\nefgh\n", "together")
+      assert in_some?(blocks(path), "abcd\nefgh\n")
+      assert Secrets.leaked(secret, blocks(path)) == ["SHORT_LINES"]
+
+      assert :ok = Git.push(path, @issue)
+      commit!(path, "one.txt", "abcd\n", "one")
+      commit!(path, "two.txt", "efgh\n", "two")
+      assert Secrets.leaked(secret, blocks(path)) == []
+
+      File.write!(Path.join(path, "three.txt"), "abcd\n")
+      File.write!(Path.join(path, "four.txt"), "efgh\n")
+      git!(path, ~w(add -A))
+      git!(path, ~w(commit --quiet -m two-files))
+      assert Secrets.leaked(secret, blocks(path)) == []
+    end
+
+    test "a value written to resolve a merge conflict is found", %{path: path, clone: clone} do
+      push_to_main!(clone, path, "c.txt", "base\n")
+      git!(path, ~w(merge --quiet --ff-only origin/main))
+      assert :ok = Git.push(path, @issue)
+
+      commit!(path, "c.txt", "branch\n", "branch change")
+      push_to_main!(clone, path, "c.txt", "main\n")
+      System.cmd("git", ~w(merge origin/main), cd: path, stderr_to_stdout: true)
+      File.write!(Path.join(path, "c.txt"), "W-resolution-value\n")
+      git!(path, ~w(add c.txt))
+      git!(path, ~w(commit --quiet --no-edit))
+
+      blocks = blocks(path)
+      assert in_some?(blocks, "W-resolution-value")
+      assert Secrets.leaked(bundle([{"W", "W-resolution-value"}]), blocks) == ["W"]
+    end
+
+    test "a value a merge only brings from the base is not", %{path: path, clone: clone} do
+      commit!(path, "mine.txt", "mine\n", "branch work")
+      push_to_main!(clone, path, "b.txt", "B-base-value-44\n")
+      git!(path, ~w(merge --quiet --no-edit origin/main))
+
+      refute in_some?(blocks(path), "B-base-value-44")
+    end
+
+    test "an octopus merge cannot be checked, until it is pushed", %{path: path} do
+      for name <- ~w(b1 b2) do
+        git!(path, ~w(checkout --quiet -b #{name} factory/issue-7))
+        commit!(path, "#{name}.txt", "#{name}\n", name)
+      end
+
+      git!(path, ~w(checkout --quiet factory/issue-7))
+      git!(path, ~w(merge --quiet --no-ff --no-commit b1 b2))
+      File.write!(Path.join(path, "o.txt"), "O-octopus-value\n")
+      git!(path, ~w(add o.txt))
+      git!(path, ~w(commit --quiet -m octopus))
+      sha = path |> git!(~w(rev-parse HEAD)) |> String.trim()
+
+      assert {:error, message} = Git.unpushed_changes(path, @project, @issue)
+      assert message =~ sha
+      refute message =~ "O-octopus-value"
+
+      assert :ok = Git.push(path, @issue)
+      assert {:ok, []} = Git.unpushed_changes(path, @project, @issue)
+    end
+
+    test "neither textconv nor -diff hide a value", %{path: path} do
+      secret = bundle([{"HIDDEN", "SECRETVALUE123"}])
+      File.write!(Path.join(path, ".gitattributes"), "s.txt diff=hide\nd.txt -diff\n")
+      git!(path, ["config", "diff.hide.textconv", "sed s/SECRET/xxxxxx/"])
+      commit!(path, "s.txt", "SECRETVALUE123\n", "textconv")
+
+      blocks = blocks(path)
+      assert in_some?(blocks, "SECRETVALUE123")
+      refute in_some?(blocks, "xxxxxx")
+      assert Secrets.leaked(secret, blocks) == ["HIDDEN"]
+
+      assert :ok = Git.push(path, @issue)
+      commit!(path, "d.txt", "SECRETVALUE123\n", "binary")
+      assert Secrets.leaked(secret, blocks(path)) == ["HIDDEN"]
+    end
+
+    test "an added line after blank context is found with suppressBlankEmpty", %{
+      path: path,
+      clone: clone
+    } do
+      push_to_main!(clone, path, "blank.txt", "a\n\nb\n")
+      git!(path, ~w(merge --quiet --ff-only origin/main))
+      git!(path, ~w(config diff.suppressBlankEmpty true))
+      commit!(path, "blank.txt", "a\n\nM-after-blank-1\nb\n", "after blank")
+
+      assert in_some?(blocks(path), "M-after-blank-1")
+    end
+  end
+
+  describe "git errors during a stage" do
+    test "a pre-push hook that prints a secret leaves no piece of it", %{clone: clone} do
+      {:ok, path} = Git.prepare(@project, @issue)
+      on_exit(fn -> Current.delete() end)
+      value = "Hook-secret-V4lu"
+      hook = Path.join([clone, ".git", "hooks", "pre-push"])
+
+      for filler <- [5996, 3000] do
+        File.write!(hook, """
+        #!/bin/sh
+        printf '%s' '#{value}'
+        head -c #{filler} /dev/zero | tr '\\0' x
+        echo
+        exit 1
+        """)
+
+        File.chmod!(hook, 0o755)
+        Current.put(bundle([{"API_KEY", value}]))
+
+        assert {:error, message} = Git.push(path, @issue)
+        refute message =~ String.slice(value, -4, 4)
+        refute message =~ value
+        # With the shorter filler, the whole value falls inside the cut: it is replaced.
+        if filler == 3000, do: assert(message =~ "[SECRET:API_KEY]")
+      end
+    end
   end
 end
