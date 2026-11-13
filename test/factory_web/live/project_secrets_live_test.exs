@@ -121,8 +121,8 @@ defmodule FactoryWeb.ProjectSecretsLiveTest do
   end
 
   # LiveViewTest has no browser: what it can show is that after each submission the
-  # fields are new elements (another id), which a browser renders from scratch with
-  # the server's value instead of keeping what was typed in the old ones.
+  # fields are new elements (another id). What a real browser keeps in them is in
+  # test/factory_web/browser/project_secrets_browser_test.exs.
   defp field(view, selector) do
     node = view |> render() |> LazyHTML.from_fragment() |> LazyHTML.query(selector)
 
@@ -205,6 +205,8 @@ defmodule FactoryWeb.ProjectSecretsLiveTest do
                 %{"name" => %{"x" => "y"}},
                 %{"name" => ["API"]},
                 %{"name" => "OTHER", "checks_only" => nil},
+                %{"name" => "OTHER", "checks_only" => ""},
+                %{"name" => "OTHER", "checks_only" => "  "},
                 %{"name" => "OTHER", "checks_only" => %{"x" => "y"}},
                 %{"name" => "OTHER", "checks_only" => ["true"]},
                 %{"name" => "OTHER", "checks_only" => "maybe"}
@@ -221,21 +223,26 @@ defmodule FactoryWeb.ProjectSecretsLiveTest do
     end
 
     test "replace_secret with checks_only that is not a boolean is refused, the view goes on",
-         %{view: view, project: project, secret: secret, level: level} do
+         %{view: view, project: project, secret: secret, user: user, level: level} do
+      # Restricted to the checks: a blank checks_only must not lift the restriction.
+      {:ok, _} = Secrets.replace_secret(secret, %{"checks_only" => "true"}, user)
       stored = row(project, "API_KEY")
+      assert stored.checks_only
       Logger.configure(level: :debug)
 
       log =
         capture_log([level: :debug], fn ->
-          for checks_only <- [nil, "maybe", %{"x" => "y"}, ["true"]] do
+          for checks_only <- [nil, "", "  ", "maybe", %{"x" => "y"}, ["true"]],
+              value <- [@value, ""] do
             view |> element("#replace-secret-#{secret.id}") |> render_click()
 
             render_hook(view, "replace_secret", %{
-              "secret" => %{"value" => @value, "checks_only" => checks_only}
+              "secret" => %{"value" => value, "checks_only" => checks_only}
             })
 
             assert Process.alive?(view.pid)
             assert has_element?(view, "#replace-secret-form")
+            assert has_element?(view, "#replace-secret-form p.text-error"), inspect(checks_only)
           end
         end)
 
