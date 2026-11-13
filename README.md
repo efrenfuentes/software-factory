@@ -40,7 +40,7 @@ contraseña (mínimo 12 caracteres) y un nivel de acceso:
 | Nivel | Puede |
 | --- | --- |
 | Administrator | Todo: proyectos, usuarios y acciones sobre los issues |
-| Operator | Aprobar planes, pedir cambios, reintentar y detener issues. No cambia proyectos ni usuarios |
+| Operator | Aprobar planes, pedir cambios al plan o al PR, reintentar y detener issues. No cambia proyectos ni usuarios |
 | Read only | Ver todo, sin cambiar nada |
 
 - Cada persona cambia su contraseña en su cuenta (el círculo con sus iniciales).
@@ -48,7 +48,7 @@ contraseña (mínimo 12 caracteres) y un nivel de acceso:
 - Siempre debe quedar un administrador activo.
 - Las acciones hechas desde el panel quedan con el nombre de quien las hizo. Los
   comentarios en GitHub salen todos con la cuenta de `gh` de la máquina, así que al
-  pedir cambios a un plan se añade al comentario quién lo escribió.
+  pedir cambios a un plan o a un PR se añade al comentario quién lo escribió.
 
 ## Flujo
 
@@ -68,12 +68,28 @@ pr_review ──cambios (máx. N rondas)──▶ developing
    │ aprobado
    ▼
 ready_to_merge ──merge de una persona──▶ done
+   │
+   └──cambios pedidos por una persona──▶ developing
 ```
 
 - El Planner clasifica el issue en `easy`, `medium` o `hard`; eso decide el modelo del
   Developer.
 - Al agotar las rondas de revisión el issue pasa a `needs_human`. Cada ronda adicional
   la autoriza una persona.
+- Con el PR abierto y el issue en `ready_to_merge`, o en `needs_human` por rondas de
+  revisión agotadas, una persona puede pedir cambios al PR (comentando en GitHub o
+  desde la página del issue). El issue vuelve a `developing` y hace otra ronda completa:
+  Developer, checks, push y Reviewer del PR. Esas rondas no gastan rondas automáticas:
+  en `ready_to_merge` el límite sube en 1, y en `needs_human` queda en la ronda actual + 1.
+- El Developer recibe lo pedido como decisión de un maintainer, con archivo y línea si
+  es un comentario de revisión, y el Reviewer comprueba que esté hecho. Cuando el PR se
+  aprueba, esos cambios pasan a ser decisiones ya acordadas: las rondas siguientes del
+  mismo PR las siguen recibiendo como parte del alcance.
+- Solo cuenta lo escrito mientras el issue espera en esos dos estados. Lo que se escribe
+  mientras la factory trabaja (`developing`, `pr_review`…) o mientras espera por otro
+  motivo no se recoge: escribe cuando el issue esté en **Ready to merge**. Si se escribe
+  algo justo cuando se abre una ronda, se atiende en la siguiente, cuando el issue
+  vuelve a esperar.
 - Si los checks fallan, el Developer lo reintenta (3 intentos; el último con el modelo
   del nivel superior). Si siguen fallando, `needs_human`, sin abrir PR.
 - La factory nunca hace merge.
@@ -97,12 +113,19 @@ defecto; por eso la factory lo hace explícitamente. Si en el proyecto desmarcas
 "Close the issue when its pull request is merged", el issue queda abierto con la
 etiqueta `factory:merged`.
 
-## Plan en el panel
+## Página del issue
 
 La página de cada issue muestra `spec.md`, `plan.md` y `tasks.md` en cuanto existen,
 leídos de la rama del issue. Mientras el plan espera aprobación puedes aprobarlo ahí
 mismo o escribir qué debe cambiar: ese texto se publica en el issue de GitHub como
 comentario tuyo y el Planner revisa el plan.
+
+Con el PR abierto esperando una persona (`ready_to_merge`, o `needs_human` por rondas
+de revisión agotadas), la página muestra **Request changes to the pull request**:
+escribe qué debe cambiar y el issue vuelve a `developing` en el momento. El comentario,
+firmado con tu nombre, se publica en el PR en segundo plano (si GitHub falla se
+reintenta, sin duplicarlo). Si el PR ya no está abierto, o el issue ya no espera
+cambios, no se envía nada.
 
 ## Comandos en GitHub
 
@@ -112,11 +135,22 @@ En un comentario del issue o del PR, al inicio de una línea:
 | --- | --- |
 | `/factory approve` | Aprueba el plan, o autoriza una ronda más, o reintenta |
 | `/factory retry` | Reintenta una etapa fallida |
-| `/factory stop` | Detiene el trabajo en el issue |
+| `/factory stop` | Detiene el trabajo en el issue, también en Ready to merge |
+
+Si un agente o un check ya está en marcha al detener el issue, termina, pero su
+resultado se descarta: no se publica nada más, ni commit, push o PR.
 
 Cualquier otro comentario mientras se esperan respuestas o la aprobación del plan vuelve
 a planificación con ese comentario como contexto. Lo mismo se puede hacer con los
 botones de la página del issue.
+
+Con el issue en Ready to merge, o en `needs_human` por rondas de revisión agotadas, y
+el PR abierto, cualquier otro comentario de un usuario permitido pide cambios al PR: en
+el issue, en la conversación del PR, como texto de un review enviado o como comentario
+sobre una línea (los reviews en borrador no cuentan). Varios comentarios de una misma
+pasada van juntos en una ronda, y la factory avisa en el PR de que recibió los cambios
+y de que el Developer trabaja en ellos. En Ready to merge, un `/factory approve` o
+`/factory retry` suelto no hace nada.
 
 ## Seguridad
 
