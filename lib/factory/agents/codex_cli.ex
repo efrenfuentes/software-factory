@@ -30,13 +30,16 @@ defmodule Factory.Agents.CodexCLI do
           timeout: @timeout
         )
 
-      # Secret values are replaced in the raw output and answer, before they are parsed or cut.
-      case Secrets.redact(request[:secrets], result) do
+      # Secret values are replaced in the raw output and answer, before they are parsed or
+      # cut, and again in what is decoded from them.
+      secrets = request[:secrets]
+
+      case Secrets.redact(secrets, result) do
         {:ok, events} ->
-          parse(events, Secrets.redact(request[:secrets], read(answer_path)))
+          parse(events, Secrets.redact(secrets, read(answer_path)), secrets)
 
         {:error, {:exit, _status, events}} ->
-          {:error, failure(events) || Shell.tail(events, 2000)}
+          {:error, Secrets.redact(secrets, failure(events)) || Shell.tail(events, 2000)}
 
         {:error, reason} ->
           {:error, Shell.describe(reason)}
@@ -71,10 +74,11 @@ defmodule Factory.Agents.CodexCLI do
 
   @doc """
   Reads the answer Codex wrote as its last message and the token usage from its
-  event stream. `answer` is nil when Codex wrote none.
+  event stream. `answer` is nil when Codex wrote none. The values of `secrets`
+  are replaced in the texts decoded from the events, before any is shown.
   """
-  def parse(events, answer) do
-    events = decode_lines(events)
+  def parse(events, answer, secrets \\ nil) do
+    events = events |> decode_lines() |> then(&Secrets.redact(secrets, &1))
     usage = Enum.find_value(events, &(&1["type"] == "turn.completed" && &1["usage"])) || %{}
 
     with nil <- failure(events),

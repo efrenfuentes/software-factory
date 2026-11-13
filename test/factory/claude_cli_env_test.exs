@@ -64,4 +64,64 @@ defmodule Factory.Agents.ClaudeCLIEnvTest do
     assert reason =~ "[SECRET:API_KEY]"
     refute reason =~ @value
   end
+
+  # A line of a multiline secret with a quote and a backslash, so its JSON form is not
+  # the literal one, long enough to cross the 1500 characters an error is cut to.
+  @line ~s(Zq"uo\\te-) <> String.duplicate("m4Xr", 300)
+  @multiline "first-line-value\n" <> @line <> "\nlast"
+
+  defp multiline_request(dir) do
+    %{
+      request(dir)
+      | env: [],
+        secrets: Bundle.new([%{name: "MULTI", value: @multiline, checks_only: false}])
+    }
+  end
+
+  defp refute_piece(text) do
+    refute text =~ String.slice(@line, 0, 12)
+    refute text =~ String.slice(@line, 600, 12)
+    refute text =~ String.slice(@line, -12, 12)
+  end
+
+  test "an error result with one line of a multiline secret keeps no piece of it", %{dir: dir} do
+    result = %{
+      "type" => "result",
+      "is_error" => true,
+      "subtype" => "error_during_execution",
+      "result" => String.duplicate("y", 1000) <> @line
+    }
+
+    File.write!(Path.join(dir, "out.json"), Jason.encode!(result) <> "\n")
+
+    File.write!(Path.join(dir, "claude"), """
+    #!/bin/sh
+    cat > /dev/null
+    cat "#{Path.join(dir, "out.json")}"
+    """)
+
+    assert {:error, reason} = ClaudeCLI.run(multiline_request(dir))
+    assert reason =~ "[SECRET:MULTI]"
+    refute_piece(reason)
+
+    # Decoded text is filtered even when the raw form was escaped in another way.
+    raw = String.replace(Jason.encode!(result), "-", "\\u002d")
+    assert {:error, reason} = ClaudeCLI.parse(raw, multiline_request(dir).secrets)
+    assert reason =~ "[SECRET:MULTI]"
+    refute_piece(reason)
+  end
+
+  test "a failed run that prints the line raw or escaped keeps no piece of it", %{dir: dir} do
+    File.write!(Path.join(dir, "out.txt"), "boom #{@line}\n#{Jason.encode!(@line)}\n")
+
+    File.write!(Path.join(dir, "claude"), """
+    #!/bin/sh
+    cat > /dev/null
+    cat "#{Path.join(dir, "out.txt")}"
+    exit 2
+    """)
+
+    assert {:error, reason} = ClaudeCLI.run(multiline_request(dir))
+    refute_piece(reason)
+  end
 end
