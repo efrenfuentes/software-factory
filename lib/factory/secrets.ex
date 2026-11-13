@@ -194,7 +194,7 @@ defmodule Factory.Secrets do
   def env(%Bundle{}, _who), do: []
 
   @doc """
-  Replaces every secret value in `term` (a text, or maps and lists of them) by
+  Replaces every secret value in `term` (a text, or maps, lists and tuples of them) by
   `[SECRET:NAME]`; at each position the longest fragment wins.
   """
   def redact(nil, term), do: term
@@ -210,6 +210,10 @@ defmodule Factory.Secrets do
 
   defp redact_term(list, patterns, names) when is_list(list),
     do: Enum.map(list, &redact_term(&1, patterns, names))
+
+  defp redact_term(tuple, patterns, names) when is_tuple(tuple) do
+    tuple |> Tuple.to_list() |> redact_term(patterns, names) |> List.to_tuple()
+  end
 
   defp redact_term(%_{} = struct, _patterns, _names), do: struct
 

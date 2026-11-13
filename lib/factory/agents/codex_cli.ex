@@ -9,7 +9,7 @@ defmodule Factory.Agents.CodexCLI do
   """
   @behaviour Factory.Agents
   alias Factory.Agents.Prompts
-  alias Factory.Shell
+  alias Factory.{Secrets, Shell}
 
   @timeout :timer.minutes(60)
 
@@ -22,13 +22,18 @@ defmodule Factory.Agents.CodexCLI do
     File.write!(schema_path, Jason.encode!(strict(request.schema)))
 
     try do
-      case Shell.run("codex", args(request, schema_path, answer_path),
-             cd: request.cwd,
-             stdin: Prompts.system() <> "\n" <> request.prompt,
-             timeout: @timeout
-           ) do
+      result =
+        Shell.run("codex", args(request, schema_path, answer_path),
+          cd: request.cwd,
+          stdin: Prompts.system() <> "\n" <> request.prompt,
+          env: request[:env] || [],
+          timeout: @timeout
+        )
+
+      # Secret values are replaced in the raw output and answer, before they are parsed or cut.
+      case Secrets.redact(request[:secrets], result) do
         {:ok, events} ->
-          parse(events, read(answer_path))
+          parse(events, Secrets.redact(request[:secrets], read(answer_path)))
 
         {:error, {:exit, _status, events}} ->
           {:error, failure(events) || Shell.tail(events, 2000)}

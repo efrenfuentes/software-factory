@@ -8,7 +8,7 @@ defmodule Factory.Agents.ClaudeCLI do
   """
   @behaviour Factory.Agents
   alias Factory.Agents.Prompts
-  alias Factory.Shell
+  alias Factory.{Secrets, Shell}
 
   @timeout :timer.minutes(60)
 
@@ -27,11 +27,16 @@ defmodule Factory.Agents.ClaudeCLI do
 
   @impl true
   def run(request) do
-    case Shell.run("claude", args(request),
-           cd: request.cwd,
-           stdin: request.prompt,
-           timeout: @timeout
-         ) do
+    result =
+      Shell.run("claude", args(request),
+        cd: request.cwd,
+        stdin: request.prompt,
+        env: request[:env] || [],
+        timeout: @timeout
+      )
+
+    # Secret values are replaced in the raw output, before it is parsed or cut.
+    case Secrets.redact(request[:secrets], result) do
       {:ok, output} ->
         parse(output)
 
