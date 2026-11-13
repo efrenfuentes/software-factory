@@ -27,8 +27,30 @@ mix phx.server   # http://localhost:4000
    tope de gasto por ejecución no se le aplica.
    El panel separa el tiempo de la factory (en cola o con un agente trabajando) del
    tiempo esperando a una persona (respuestas, aprobaciones, merge, reintentos).
-2. Pon la etiqueta `factory:ready` (configurable) a un issue. La factory lo recoge en
+2. Si el repositorio necesita variables con secretos para el setup, los tests o el lint
+   (API keys, un `DATABASE_URL` propio…), añádelas en la sección **Secrets** de la
+   edición del proyecto (solo administradores). Ver [Secretos del proyecto](#secretos-del-proyecto).
+3. Pon la etiqueta `factory:ready` (configurable) a un issue. La factory lo recoge en
    menos de un minuto.
+
+### Secretos del proyecto
+
+En **Projects → (proyecto) → Secrets** se añade cada secreto con un nombre de variable
+de entorno (`DATABASE_URL`, `API_KEY`…), su valor (admite varias líneas, p. ej. una clave
+PEM) y la casilla **Only for the checks**:
+
+- Los checks (setup, tests y lint) reciben todos los secretos.
+- El Developer recibe los que no son "solo para checks", y su prompt nombra unos y otros
+  (sin valores). Planner, Reviewer, `gh` y `git` no reciben ninguno.
+- El valor se guarda cifrado (AES-256-GCM con `FACTORY_SECRETS_KEY`) y no se vuelve a
+  mostrar: se puede **reemplazar** (con el valor vacío solo cambia la casilla) o borrar.
+- Mínimo 8 caracteres. Los nombres que la factory usa o pasa a todos los procesos
+  (`PATH`, `HOME`, `LC_*`, `FACTORY_*`, `ANTHROPIC_*`, `CLAUDE_*`, los de
+  `FACTORY_ENV_PASSTHROUGH`…) están reservados.
+- En todo lo que la factory guarda o publica (comentarios, PR, historial, resultados de
+  los checks y de los agentes) cada valor aparece como `[SECRET:NOMBRE]`.
+- La lista marca los secretos guardados con otra clave y los que tienen un nombre que
+  pasó a estar reservado (no se usan).
 
 ## Usuarios y permisos
 
@@ -90,8 +112,23 @@ ready_to_merge ──merge de una persona──▶ done
   motivo no se recoge: escribe cuando el issue esté en **Ready to merge**. Si se escribe
   algo justo cuando se abre una ronda, se atiende en la siguiente, cuando el issue
   vuelve a esperar.
+- Al entrar en `developing` corre el setup del stack, registrado como una ejecución
+  **Setup** en la página del issue (con su salida, filtrada, si falla). No arranca si el
+  issue ya se detuvo.
 - Si los checks fallan, el Developer lo reintenta (3 intentos; el último con el modelo
   del nivel superior). Si siguen fallando, `needs_human`, sin abrir PR.
+- Si el proyecto tiene secretos, antes de cada push (del plan y del código) la factory
+  revisa lo que enviaría: los mensajes y las líneas añadidas de los commits que no están
+  en `origin/<rama del issue>` ni en `origin/<rama base>`. En un merge cuenta lo que el
+  propio merge cambia (resolución de conflictos), no lo que trae de sus padres; un merge
+  de tres o más ramas (octopus) no se puede revisar y hace fallar la etapa. Si aparece el
+  valor de un secreto, no hay push ni PR: el issue queda en `needs_human` ("The changes
+  contain the value of a project secret") con un comentario que nombra el secreto, y al
+  aprobarlo el Developer recibe el encargo de quitarlo de los commits sin publicar.
+  Necesita git ≥ 2.36 (`--remerge-diff`); con uno anterior la revisión falla y no hay push.
+- Si los secretos del proyecto no se pueden descifrar (falta la clave, es otra, o el dato
+  está alterado), la etapa no lanza nada y el issue pasa a `failed` nombrándolos; se
+  reintenta con `/factory retry` o el botón Retry tras corregirlo.
 - La factory nunca hace merge.
 
 Spec, plan y tareas quedan en la rama del issue, en `.factory/issue-N/`, y forman parte
@@ -163,6 +200,44 @@ y de que el Developer trabaja en ellos. En Ready to merge, un `/factory approve`
   con repositorios e issues en los que confíes.
 - Los clones viven en `~/.software-factory` (o `FACTORY_HOME`), separados de tus copias
   de trabajo.
+- Los procesos que lanza la factory reciben un entorno mínimo (ver
+  [Despliegue](#despliegue)), no el del servicio.
+- Secretos: usa valores de sandbox, no de producción. Límites conocidos:
+  - El Developer corre como el mismo usuario del sistema que el servicio y con Bash puede
+    leer sus archivos (incluido el archivo de entorno del servicio, con la clave) y
+    `/proc/<pid>/environ` de sus procesos.
+  - Los checks pueden escribir los secretos en el worktree (p. ej. un `.env` generado).
+  - Claude Code guarda transcripciones en el `HOME` del usuario, que pueden contener lo
+    que el Developer vio.
+  - El filtro y la revisión del push buscan el valor literal (y su forma escapada en
+    JSON, y cada línea larga de uno multilínea): no reconocen valores transformados
+    (base64, URL-encoded, troceados).
+
+## Despliegue
+
+`bin/deploy` hace pull, compila la release, migra y reinicia el servicio systemd, con las
+variables del archivo de entorno (`/etc/factory/factory.env` por defecto,
+`FACTORY_ENV_FILE` para otro).
+
+- **`FACTORY_SECRETS_KEY`**: la clave que cifra los secretos de los proyectos, 32 bytes
+  en base64. Genérala con `openssl rand -base64 32` y añádela al archivo de entorno.
+  - Si falta, la factory arranca, lo avisa en el log (y `bin/deploy` al desplegar) y
+    funciona sin secretos: la sección Secrets no deja añadir ni reemplazar, y los
+    proyectos que ya tienen secretos fallan al correr una etapa.
+  - Si está pero no son 32 bytes en base64, la factory no arranca y dice cómo generarla.
+  - Si se pierde o se cambia, los secretos guardados no se pueden recuperar: hay que
+    volver a escribirlos en el panel (la lista marca los guardados con otra clave).
+- **Entorno mínimo**: checks, agentes, `gh` y `git` no heredan el entorno del servicio
+  (`DATABASE_URL`, `SECRET_KEY_BASE`, `MIX_ENV`, `RELEASE_*`…). Solo reciben `PATH HOME
+  USER LOGNAME SHELL LANG LANGUAGE TZ TMPDIR SSH_AUTH_SOCK`, los proxies (`HTTP_PROXY`,
+  `HTTPS_PROXY`, `NO_PROXY` y sus minúsculas), `SSL_CERT_FILE SSL_CERT_DIR
+  CLAUDE_CONFIG_DIR CODEX_HOME GH_CONFIG_DIR`, las que empiezan por `LC_`, `XDG_` o
+  `MISE_`, y lo que cada etapa les pasa.
+- **`FACTORY_ENV_PASSTHROUGH`**: nombres de variables, separados por comas, que se
+  añaden a ese entorno (p. ej. `FACTORY_ENV_PASSTHROUGH=GH_TOKEN,ANTHROPIC_API_KEY`).
+  Hace falta si `gh`, `claude` o `codex` se autentican por variables de entorno. Los
+  nombres no válidos se ignoran con un aviso al arrancar, y los válidos quedan
+  reservados para los secretos. Ojo: el Developer también ve esas variables.
 
 ## Configuración adicional
 
