@@ -27,7 +27,18 @@ defmodule Factory.Fakes.State do
       gate_hooks: %{},
       gate_calls: 0,
       commits: [],
-      pushes: []
+      pushes: [],
+      setups: 0,
+      # Functions run once when a workspace call starts: %{call => fun}.
+      workspace_hooks: %{},
+      # What the next push answers instead of succeeding, if anything.
+      push_failure: nil,
+      # What `unpushed_changes/4` answers: blocks, or `{:error, message}`.
+      unpushed: [],
+      # What `head/2` answers, and the commits pushed and checked for secrets.
+      head: {:ok, "fake-sha"},
+      pushed_shas: [],
+      checked_shas: []
     }
   end
 

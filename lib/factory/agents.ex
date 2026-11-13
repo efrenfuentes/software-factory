@@ -3,7 +3,7 @@ defmodule Factory.Agents do
   Runs one agent for one stage and records it as a stage run, with the model,
   effort, duration, tokens and cost that the dashboard shows.
   """
-  alias Factory.Pipeline
+  alias Factory.{Pipeline, Secrets}
   alias Factory.Pipeline.Issue
   alias Factory.Projects.Project
 
@@ -14,7 +14,9 @@ defmodule Factory.Agents do
           model: String.t(),
           effort: String.t(),
           cwd: String.t(),
-          max_budget_usd: Decimal.t() | nil
+          max_budget_usd: Decimal.t() | nil,
+          env: [{String.t(), String.t()}],
+          secrets: Factory.Secrets.Bundle.t() | nil
         }
   @type result :: %{
           output: map(),
@@ -38,6 +40,11 @@ defmodule Factory.Agents do
   The agent only starts if `Pipeline.authorize_run/2` records its run before the
   issue is stopped; and if the issue was stopped while it worked, its answer is
   dropped. Either way the result is `{:stopped, issue}`.
+
+  The request carries the secrets the role may see in its environment (`env`,
+  only the Developer gets any) and the project's secrets (`secrets`) for the
+  runner to replace their values in what the agent prints. The answer is
+  filtered again before it is stored or returned.
   """
   @spec run(Issue.t(), Project.t(), map()) ::
           {:ok, map()} | {:error, String.t()} | {:stopped, Issue.t()}
@@ -59,7 +66,9 @@ defmodule Factory.Agents do
       model: model,
       effort: effort,
       cwd: spec.cwd,
-      max_budget_usd: project.max_budget_usd
+      max_budget_usd: project.max_budget_usd,
+      env: Secrets.env(project.secrets, role),
+      secrets: project.secrets
     }
 
     attrs = %{stage: stage, role: to_string(role), round: round, model: model, effort: effort}
@@ -70,7 +79,7 @@ defmodule Factory.Agents do
 
       {:ok, run} ->
         result = impl(model).run(request)
-        answer = finish(run, role, result)
+        answer = finish(run, role, Secrets.redact(project.secrets, result))
         if Pipeline.stopped?(issue), do: {:stopped, issue}, else: answer
     end
   end

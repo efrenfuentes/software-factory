@@ -11,8 +11,15 @@ defmodule Factory.Fakes.Gates do
     State.update(:gate_hooks, &Map.put(&1, at, fun))
   end
 
+  @doc "How many setups ran."
+  def setups, do: State.get(:setups)
+
   @impl true
-  def setup(_project, _issue, _path), do: :ok
+  def setup(_project, _issue, _path) do
+    State.update(:setups, &(&1 + 1))
+    :ok
+  end
+
   @impl true
   def check(_project, _issue, _path) do
     State.update(:gate_calls, &(&1 + 1))

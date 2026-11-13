@@ -24,6 +24,12 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < "$env_file"
 export MIX_ENV=prod
 
+# Without the key the factory still starts, but projects with secrets cannot run.
+if [[ -z "${FACTORY_SECRETS_KEY:-}" ]]; then
+  printf 'warning: %s does not set FACTORY_SECRETS_KEY; projects with secrets will fail.\n' "$env_file" >&2
+  printf '         Generate one with: openssl rand -base64 32\n' >&2
+fi
+
 if $pull; then
   step "Pulling"
   git pull --ff-only

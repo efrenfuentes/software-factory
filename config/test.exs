@@ -46,3 +46,6 @@ config :factory,
   agent_runners: %{claude: Factory.Fakes.Agent, codex: Factory.Fakes.Agent},
   workspace: Factory.Fakes.Workspace,
   gates: Factory.Fakes.Gates
+
+# A fixed key for the project secrets in tests.
+config :factory, :secrets_key, "dGVzdC1rZXktZm9yLXByb2plY3Qtc2VjcmV0cy0zMmI="

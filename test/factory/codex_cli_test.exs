@@ -35,6 +35,30 @@ defmodule Factory.Agents.CodexCLITest do
              CodexCLI.parse("command not found", nil)
   end
 
+  test "a secret line in a decoded failure or message is replaced before it is shown" do
+    line = ~s(Zq"uo\\te-) <> String.duplicate("m4Xr", 300)
+
+    secrets =
+      Factory.Secrets.Bundle.new([
+        %{name: "MULTI", value: "first-line-value\n#{line}\nlast", checks_only: false}
+      ])
+
+    # Escaped in a way the raw filter does not know (`\u002d` for `-`).
+    escaped = fn text -> text |> Jason.encode!() |> String.replace("-", "\\u002d") end
+    failed = ~s({"type":"turn.failed","error":{"message":#{escaped.(line)}}})
+
+    assert {:error, reason} = CodexCLI.parse(failed, nil, secrets)
+    assert reason == "codex failed: [SECRET:MULTI]"
+
+    message =
+      ~s({"type":"item.completed","item":{"type":"agent_message","text":#{escaped.("not json " <> line)}}})
+
+    assert {:error, reason} = CodexCLI.parse(message, nil, secrets)
+    assert reason =~ "[SECRET:MULTI]"
+    refute reason =~ String.slice(line, 0, 12)
+    refute reason =~ String.slice(line, -12, 12)
+  end
+
   test "runs read-only, without the user's configuration, on the chosen model and effort" do
     args = CodexCLI.args(%{model: "gpt-6-astra", effort: "high"}, "/s.json", "/a.json")
 

@@ -86,3 +86,6 @@ config :phoenix_live_view,
 
 # Disable swoosh api client as it is only required for production adapters.
 config :swoosh, :api_client, false
+
+# A fixed key for the project secrets in development; `FACTORY_SECRETS_KEY` replaces it.
+config :factory, :secrets_key, "ZGV2LWtleS1mb3ItcHJvamVjdC1zZWNyZXRzLTMyYnk="

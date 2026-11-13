@@ -26,7 +26,8 @@ defmodule FactoryWeb.IssueLive do
     issue = Pipeline.get_issue!(id)
     runs = Pipeline.list_runs(issue)
 
-    plan = Workspace.impl().read_plan(issue.project, issue)
+    # Filtered here, before anything is assigned: the branch may hold a refused push.
+    plan = Workspace.shown_plan(issue.project, issue)
 
     assign(socket,
       page_title: "##{issue.number} #{issue.title}",

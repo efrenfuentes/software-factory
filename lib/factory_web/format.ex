@@ -14,7 +14,8 @@ defmodule FactoryWeb.Format do
     "failed" => "Failed",
     "done" => "Done",
     "cancelled" => "Cancelled",
-    "gates" => "Checks"
+    "gates" => "Checks",
+    "setup" => "Setup"
   }
 
   @hold_labels %{
@@ -23,7 +24,8 @@ defmodule FactoryWeb.Format do
     "gates_failed" => "Tests or lint keep failing",
     "no_changes" => "The Developer changed no code",
     "developer_blocked" => "The Developer is blocked",
-    "error" => "A stage failed to run"
+    "error" => "A stage failed to run",
+    "secret_in_diff" => "The changes contain the value of a project secret"
   }
 
   def state(state), do: Map.get(@state_labels, state, state)

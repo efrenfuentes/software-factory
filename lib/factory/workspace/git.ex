@@ -93,12 +93,43 @@ defmodule Factory.Workspace.Git do
     end
   end
 
+  @doc """
+  The commit the issue's branch points to, which the check for secrets and the
+  push then use, so that what is checked is what is published. It is an error
+  when the worktree is not on that branch (another branch, or a detached HEAD).
+  """
   @impl true
-  def code_changed?(path, project) do
+  def head(path, issue) do
+    expected = "refs/heads/#{issue.branch}"
+
+    with {:ok, ref} <- current_ref(path),
+         :ok <- same_ref(ref, expected),
+         {:ok, sha} <- git(path, ["rev-parse", "--verify", "--quiet", expected <> "^{commit}"]) do
+      {:ok, String.trim(sha)}
+    else
+      {:error, reason} -> {:error, describe(reason)}
+    end
+  end
+
+  defp current_ref(path) do
+    case git(path, ~w(symbolic-ref --quiet HEAD)) do
+      {:ok, ref} -> {:ok, String.trim(ref)}
+      {:error, {:exit, _, _}} -> {:ok, "a detached HEAD"}
+      error -> error
+    end
+  end
+
+  defp same_ref(ref, ref), do: :ok
+
+  defp same_ref(ref, expected),
+    do: {:error, "the worktree is on #{ref}, not on #{expected}: nothing is pushed"}
+
+  @impl true
+  def code_changed?(path, project, sha) do
     args = [
       "diff",
       "--quiet",
-      "origin/#{project.base_branch}...HEAD",
+      "origin/#{project.base_branch}...#{sha}",
       "--",
       ".",
       ":(exclude).factory"
@@ -107,11 +138,119 @@ defmodule Factory.Workspace.Git do
     match?({:error, {:exit, 1, _}}, git(path, args))
   end
 
+  @doc "Publishes the commit `sha` (from `head/2`) as the issue's branch, and only that."
   @impl true
-  def push(path, issue) do
-    case git(path, ~w(push -u origin #{issue.branch})) do
-      {:ok, _} -> :ok
+  def push(path, issue, sha) do
+    case git(path, ["push", "origin", "#{sha}:refs/heads/#{issue.branch}"]) do
+      {:ok, _} ->
+        # A commit is not a branch, so the push alone does not set the upstream.
+        git(path, ["branch", "--set-upstream-to=origin/#{issue.branch}", issue.branch])
+        :ok
+
+      {:error, reason} ->
+        {:error, describe(reason)}
+    end
+  end
+
+  @doc """
+  The commits a push of `sha` would send are those reachable from it but not
+  from `origin/<base>` nor, once pushed, `origin/<branch>`. Their messages and
+  the lines they add are returned as blocks; a two-parent merge adds what
+  differs from the automatic merge of its parents (`--remerge-diff`, git >= 2.36).
+
+  The patch is asked for so that nothing the repository configures can hide or
+  transform its content: no textconv, no external diff, binary files as text,
+  root commits always diffed (`--root`, whatever `log.showRoot` says). Each
+  message is given twice: as stored (`--encoding=none`) and in UTF-8, whatever
+  `i18n.logOutputEncoding` says. A merge git cannot diff that way (three or
+  more parents) is an error.
+  """
+  @impl true
+  def unpushed_changes(path, project, issue, sha) do
+    range = [sha, "--not", "origin/#{project.base_branch}"] ++ pushed_branch(path, issue)
+
+    patch_args =
+      ~w(log -p --root --no-color --no-ext-diff --no-textconv --text --no-renames
+         --no-relative --diff-merges=remerge --format=tformat:factory-commit) ++ range
+
+    with {:ok, raw} <- git(path, ["log", "-z", "--encoding=none", "--format=%B" | range]),
+         {:ok, utf8} <- git(path, ["log", "-z", "--encoding=UTF-8", "--format=%B" | range]),
+         {:ok, octopus} <- git(path, ["rev-list", "--min-parents=3" | range]),
+         :ok <- no_octopus(octopus),
+         {:ok, patch} <- git(path, patch_args),
+         :ok <- no_diff_warning(patch) do
+      {:ok, Enum.uniq(messages(raw) ++ messages(utf8)) ++ added_blocks(patch)}
+    else
       {:error, reason} -> {:error, describe(reason)}
+    end
+  end
+
+  defp messages(output),
+    do: output |> String.split(<<0>>) |> Enum.reject(&(String.trim(&1) == ""))
+
+  defp pushed_branch(path, issue) do
+    case git(path, ~w(rev-parse --verify --quiet origin/#{issue.branch})) do
+      {:ok, _} -> ["origin/#{issue.branch}"]
+      _ -> []
+    end
+  end
+
+  defp no_octopus(output) do
+    case String.split(output, "\n", trim: true) do
+      [] ->
+        :ok
+
+      shas ->
+        {:error,
+         "the octopus merge #{Enum.join(shas, ", ")} cannot be checked for secrets: " <>
+           "merge one branch at a time"}
+    end
+  end
+
+  # git writes this when it could not diff a commit, which then has no patch to check.
+  defp no_diff_warning(patch) do
+    case Enum.find(String.split(patch, "\n"), &String.starts_with?(&1, "diff: warning:")) do
+      nil -> :ok
+      line -> {:error, "the commits to push cannot be checked for secrets: #{line}"}
+    end
+  end
+
+  @doc false
+  # Each run of consecutive added lines of a hunk, without the `+` and with a
+  # `\n` after each line. Headers (`+++ b/…` included) are never content.
+  def added_blocks(patch) do
+    {blocks, current, _mode} =
+      patch
+      |> String.split("\n")
+      |> Enum.reduce({[], [], :header}, fn line, {blocks, current, mode} ->
+        cond do
+          String.starts_with?(line, "@@") ->
+            {close(blocks, current), [], :hunk}
+
+          mode == :header ->
+            {blocks, current, :header}
+
+          String.starts_with?(line, "+") ->
+            added = line |> binary_part(1, byte_size(line) - 1) |> String.trim_trailing("\r")
+            {blocks, [current, added, "\n"], :hunk}
+
+          # Context (an empty line is blank context with `diff.suppressBlankEmpty`),
+          # a removed line or `\ No newline at end of file` end the run.
+          line == "" or String.starts_with?(line, [" ", "-", "\\"]) ->
+            {close(blocks, current), [], :hunk}
+
+          true ->
+            {close(blocks, current), [], :header}
+        end
+      end)
+
+    blocks |> close(current) |> Enum.reverse()
+  end
+
+  defp close(blocks, current) do
+    case IO.iodata_to_binary(current) do
+      "" -> blocks
+      block -> [block | blocks]
     end
   end
 

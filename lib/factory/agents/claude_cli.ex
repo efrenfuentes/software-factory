@@ -8,7 +8,7 @@ defmodule Factory.Agents.ClaudeCLI do
   """
   @behaviour Factory.Agents
   alias Factory.Agents.Prompts
-  alias Factory.Shell
+  alias Factory.{Secrets, Shell}
 
   @timeout :timer.minutes(60)
 
@@ -27,16 +27,24 @@ defmodule Factory.Agents.ClaudeCLI do
 
   @impl true
   def run(request) do
-    case Shell.run("claude", args(request),
-           cd: request.cwd,
-           stdin: request.prompt,
-           timeout: @timeout
-         ) do
+    result =
+      Shell.run("claude", args(request),
+        cd: request.cwd,
+        stdin: request.prompt,
+        env: request[:env] || [],
+        timeout: @timeout
+      )
+
+    # Secret values are replaced in the raw output, before it is parsed or cut, and
+    # again in what is decoded from it.
+    secrets = request[:secrets]
+
+    case Secrets.redact(secrets, result) do
       {:ok, output} ->
-        parse(output)
+        parse(output, secrets)
 
       {:error, {:exit, _status, output}} ->
-        with({:ok, _} <- parse(output), do: {:error, Shell.tail(output, 2000)})
+        with({:ok, _} <- parse(output, secrets), do: {:error, Shell.tail(output, 2000)})
 
       {:error, reason} ->
         {:error, Shell.describe(reason)}
@@ -71,8 +79,12 @@ defmodule Factory.Agents.ClaudeCLI do
     ] ++ budget
   end
 
-  @doc "Reads the final result object Claude Code prints, ignoring any other output around it."
-  def parse(output) do
+  @doc """
+  Reads the final result object Claude Code prints, ignoring any other output
+  around it. The values of `secrets` are replaced in what is decoded, before
+  an error message is cut.
+  """
+  def parse(output, secrets \\ nil) do
     result =
       output
       |> String.split("\n", trim: true)
@@ -95,10 +107,11 @@ defmodule Factory.Agents.ClaudeCLI do
          }}
 
       %{} ->
-        {:error, "#{result["subtype"]}: #{String.slice(to_string(result["result"]), 0, 1500)}"}
+        text = Secrets.redact(secrets, to_string(result["result"]))
+        {:error, Secrets.redact(secrets, "#{result["subtype"]}: #{String.slice(text, 0, 1500)}")}
 
       nil ->
-        {:error, "no result from claude: #{Shell.tail(output, 1500)}"}
+        {:error, "no result from claude: #{Shell.tail(Secrets.redact(secrets, output), 1500)}"}
     end
   end
 

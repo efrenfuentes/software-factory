@@ -46,6 +46,9 @@ defmodule Factory.Projects.Project do
     field :test_cmd, :string
     field :lint_cmd, :string
 
+    # The decrypted secrets, set only while a stage runs (`Factory.Secrets.load/1`).
+    field :secrets, :any, virtual: true, redact: true
+
     has_many :issues, Factory.Pipeline.Issue
 
     timestamps(type: :utc_datetime)

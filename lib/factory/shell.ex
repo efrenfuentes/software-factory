@@ -2,7 +2,12 @@ defmodule Factory.Shell do
   @moduledoc """
   Runs external commands with a timeout, optional stdin from a string and
   stderr merged into the output.
+
+  Every command gets the minimal environment of `Factory.Shell.Env` plus the
+  `:env` given, never the service's whole environment.
   """
+
+  alias Factory.Shell.Env
 
   @default_timeout :timer.minutes(5)
 
@@ -35,10 +40,8 @@ defmodule Factory.Shell do
   end
 
   defp exec(exe, args, stdin_path, opts) do
-    env =
-      for {key, value} <- [{"FACTORY_STDIN", stdin_path} | Keyword.get(opts, :env, [])] do
-        {String.to_charlist(key), value && String.to_charlist(value)}
-      end
+    # The child gets the minimal environment, never the service's whole one.
+    env = Env.port_env([{"FACTORY_STDIN", stdin_path} | Keyword.get(opts, :env, [])])
 
     port_opts = [
       :binary,
@@ -78,8 +81,9 @@ defmodule Factory.Shell do
 
   defp kill(port) do
     with {:os_pid, pid} <- Port.info(port, :os_pid) do
-      System.cmd("pkill", ["-TERM", "-P", to_string(pid)], stderr_to_stdout: true)
-      System.cmd("kill", ["-TERM", to_string(pid)], stderr_to_stdout: true)
+      env = Env.cmd_env()
+      System.cmd("pkill", ["-TERM", "-P", to_string(pid)], stderr_to_stdout: true, env: env)
+      System.cmd("kill", ["-TERM", to_string(pid)], stderr_to_stdout: true, env: env)
     end
 
     # The port may close by itself once the process dies, between the check and the close.
@@ -96,8 +100,12 @@ defmodule Factory.Shell do
   def describe(:enoent), do: "command not found"
   def describe(other), do: inspect(other)
 
-  @doc "The last `chars` characters of a long output."
+  @doc """
+  The last `chars` characters of a long output. During a stage, the project's
+  secret values are replaced first, so no piece of one survives the cut.
+  """
   def tail(output, chars \\ 6000) do
+    output = Factory.Secrets.Current.redact(output)
     if String.length(output) > chars, do: "…" <> String.slice(output, -chars, chars), else: output
   end
 end
