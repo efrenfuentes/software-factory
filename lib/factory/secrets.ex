@@ -41,6 +41,32 @@ defmodule Factory.Secrets do
     )
   end
 
+  @doc "Like `get_secret!/2`, but nil when there is no such secret (or `id` is not one)."
+  def get_secret(%Project{id: project_id}, id) do
+    case parse_id(id) do
+      nil ->
+        nil
+
+      id ->
+        Repo.one(
+          from s in ProjectSecret,
+            where: s.project_id == ^project_id and s.id == ^id,
+            select: struct(s, ^@listed)
+        )
+    end
+  end
+
+  defp parse_id(id) when is_integer(id), do: id
+
+  defp parse_id(id) when is_binary(id) do
+    case Integer.parse(id) do
+      {id, ""} -> id
+      _ -> nil
+    end
+  end
+
+  defp parse_id(_), do: nil
+
   def change_secret(secret \\ %ProjectSecret{}, attrs \\ %{}),
     do: ProjectSecret.create_changeset(secret, attrs)
 
@@ -100,7 +126,7 @@ defmodule Factory.Secrets do
   defp clear_value({:ok, secret}), do: {:ok, %{secret | value: nil, encrypted_value: nil}}
 
   defp clear_value({:error, changeset}),
-    do: {:error, %{changeset | changes: Map.delete(changeset.changes, :value)}}
+    do: {:error, %{changeset | changes: Map.drop(changeset.changes, [:value, :encrypted_value])}}
 
   defp key do
     case Cipher.key() do

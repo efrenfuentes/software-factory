@@ -190,6 +190,35 @@ defmodule FactoryWeb.UsersTest do
       assert has_element?(view, "#transitions", "Stopped by Ana Pérez")
     end
 
+    test "cannot change a project's secrets, even sending the events by hand", %{conn: conn} do
+      {:ok, project} =
+        Projects.create_project(%{repo: "acme/app", app_type: "elixir", allowed_users: "m"})
+
+      {:ok, secret} =
+        Factory.Secrets.create_secret(
+          project,
+          %{"name" => "API_KEY", "value" => "s3cr3t-value"},
+          user_fixture()
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/projects")
+
+      assert render_hook(view, "add_secret", %{
+               "secret" => %{"name" => "OTHER", "value" => "another-value"}
+             }) =~ "Only administrators"
+
+      assert render_hook(view, "delete_secret", %{"id" => to_string(secret.id)}) =~
+               "Only administrators"
+
+      assert render_hook(view, "replace_secret", %{"secret" => %{"value" => "x-value-123"}}) =~
+               "Only administrators"
+
+      assert [%{name: "API_KEY"}] = Factory.Secrets.list_secrets(project)
+
+      assert Factory.Repo.get!(Factory.Secrets.ProjectSecret, secret.id).updated_at ==
+               secret.updated_at
+    end
+
     test "ask for changes to a pull request", %{conn: conn} do
       {:ok, project} =
         Projects.create_project(%{repo: "acme/app", app_type: "elixir", allowed_users: "m"})
