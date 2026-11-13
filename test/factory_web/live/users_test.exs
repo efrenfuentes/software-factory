@@ -1,5 +1,6 @@
 defmodule FactoryWeb.UsersTest do
   use FactoryWeb.ConnCase, async: false
+  use Oban.Testing, repo: Factory.Repo
   import Phoenix.LiveViewTest
   import Factory.AccountsFixtures
 
@@ -8,6 +9,14 @@ defmodule FactoryWeb.UsersTest do
   setup do
     Fakes.State.reset()
     :ok
+  end
+
+  defp run_to_rest(issue) do
+    issue = Pipeline.get_issue!(issue.id)
+
+    if Pipeline.Issue.active?(issue),
+      do: issue |> Factory.Pipeline.Stages.run() |> elem(1) |> run_to_rest(),
+      else: issue
   end
 
   describe "signing in" do
@@ -180,6 +189,27 @@ defmodule FactoryWeb.UsersTest do
       # Who did it is recorded.
       assert has_element?(view, "#transitions", "Stopped by Ana Pérez")
     end
+
+    test "ask for changes to a pull request", %{conn: conn} do
+      {:ok, project} =
+        Projects.create_project(%{repo: "acme/app", app_type: "elixir", allowed_users: "m"})
+
+      Fakes.GitHub.put_issue(7, title: "Add export")
+
+      {:ok, issue} =
+        Pipeline.track_issue(project, %{number: 7, title: "Add export", body: "", url: "u"})
+
+      issue = run_to_rest(issue)
+      assert issue.state == "ready_to_merge"
+
+      {:ok, view, _html} = live(conn, ~p"/issues/#{issue.id}")
+
+      view
+      |> form("#pr-feedback-form", pr_changes: %{feedback: "Rename the CSV"})
+      |> render_submit()
+
+      assert Pipeline.get_issue!(issue.id).state == "developing"
+    end
   end
 
   describe "read-only users" do
@@ -209,6 +239,11 @@ defmodule FactoryWeb.UsersTest do
 
       assert render_hook(view, "request_changes", %{"review" => %{"feedback" => "x"}}) =~
                "can only read"
+
+      assert render_hook(view, "request_pr_changes", %{"pr_changes" => %{"feedback" => "x"}}) =~
+               "can only read"
+
+      assert all_enqueued(worker: Factory.Workers.CommentWorker) == []
 
       assert Pipeline.get_issue!(issue.id).state == "planning"
       assert Fakes.GitHub.posted() == []
